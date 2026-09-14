@@ -1,0 +1,19 @@
+[auth]
+enabled = true
+providers = ["email"]
+hosted_login = true
+
+[ai]
+required = true
+
+[[secret]]
+name = "UPSTOX_CLIENT_ID"
+expose = true
+
+[[secret]]
+name = "UPSTOX_CLIENT_SECRET"
+expose = true
+
+[[secret]]
+name = "ANTHROPIC_API_KEY"
+expose = true

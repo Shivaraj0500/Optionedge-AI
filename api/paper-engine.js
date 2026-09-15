@@ -169,11 +169,41 @@ async function riskGate(userId, campaign, chain, ctx) {
   add('Daily loss', daily > -Number(cfg.max_daily_loss), `daily ${daily.toFixed(2)} / floor -${Number(cfg.max_daily_loss).toFixed(2)}`);
   add('Campaign loss', total > -Number(cfg.max_campaign_loss), `total ${total.toFixed(2)} / floor -${Number(cfg.max_campaign_loss).toFixed(2)}`);
   add('Position quantity', maxQty <= Number(cfg.max_position_quantity), `max open qty ${maxQty} / limit ${Number(cfg.max_position_quantity)}`);
-  add('Roll count', rolls < Number(cfg.max_rolls), `rolls ${rolls} / limit ${Number(cfg.max_rolls)}`);
+  // Roll count is enforced at the actual roll decision, not on ordinary entries.
+  add('Roll count', rolls <= Number(cfg.max_rolls), `rolls ${rolls} / limit ${Number(cfg.max_rolls)}`);
   add('Premium exposure', grossPremium <= Number(cfg.max_premium_exposure), `gross ${grossPremium.toFixed(2)} / limit ${Number(cfg.max_premium_exposure).toFixed(2)}`);
   add('Data freshness', age <= Number(cfg.stale_data_seconds), `candle age ${Number.isFinite(age)?age.toFixed(0):'unknown'}s / limit ${Number(cfg.stale_data_seconds)}s`);
   const blocked = checks.some(x=>!x.pass);
   return { blocked, reason: blocked ? 'RISK_GATE_BLOCKED' : 'RISK_GATE_PASSED', checks, metrics: { daily_realized: daily, campaign_total: total, rolls, gross_premium_exposure: grossPremium, max_open_quantity: maxQty, candle_age_seconds: Number.isFinite(age)?age:null } };
+}
+
+async function projectedRiskGate(userId, campaign, selected, ctx) {
+  const q = await db.query('SELECT * FROM risk_configs WHERE user_id=$1 LIMIT 1', [userId]);
+  const cfg = q.rows[0] || { max_daily_loss: 50000, max_campaign_loss: 100000, max_position_quantity: 100000, max_rolls: 5, max_premium_exposure: 1000000, max_spread_pct: 10, stale_data_seconds: 1800, kill_switch: false };
+  const checks = [];
+  const add = (name, pass, detail) => checks.push({ name, pass, detail });
+  add('Kill switch', !cfg.kill_switch, cfg.kill_switch ? 'ACTIVE' : 'inactive');
+  const currentQ = await db.query('SELECT * FROM paper_campaign_legs WHERE campaign_id=$1 AND user_id=$2 AND status=$3', [campaign.id, userId, 'OPEN']);
+  const open = currentQ.rows;
+  const dailyQ = await db.query("SELECT COALESCE(SUM(pnl),0) AS pnl FROM paper_campaign_legs WHERE user_id=$1 AND status='CLOSED' AND exit_at >= CURRENT_DATE", [userId]);
+  const daily = Number(dailyQ.rows[0]?.pnl || 0);
+  const openPnl = open.reduce((s,x)=>s+Number(x.pnl||0),0);
+  const total = Number(campaign.realized_pnl || 0) + openPnl;
+  const newQty = selected.reduce((m,x)=>Math.max(m, Number(x.quantity||0)),0);
+  const newExposure = selected.reduce((s,x)=>s+Math.abs(Number(x.entry_price||0)*Number(x.quantity||0)),0);
+  const maxQty = Math.max(open.reduce((m,x)=>Math.max(m,Number(x.quantity||0)),0), newQty);
+  const existingExposure = open.reduce((s,x)=>s+Math.abs(Number(x.entry_price||0)*Number(x.quantity||0)),0);
+  const exposure = existingExposure + newExposure;
+  const badSpread = selected.filter(x => Number.isFinite(Number(x.spreadPct)) && Number(x.spreadPct) > Number(cfg.max_spread_pct)).length;
+  add('Daily loss', daily > -Number(cfg.max_daily_loss), `daily ${daily.toFixed(2)} / floor -${Number(cfg.max_daily_loss).toFixed(2)}`);
+  add('Campaign loss', total > -Number(cfg.max_campaign_loss), `total ${total.toFixed(2)} / floor -${Number(cfg.max_campaign_loss).toFixed(2)}`);
+  add('Projected position quantity', maxQty <= Number(cfg.max_position_quantity), `projected max qty ${maxQty} / limit ${Number(cfg.max_position_quantity)}`);
+  add('Projected premium exposure', exposure <= Number(cfg.max_premium_exposure), `projected gross ${exposure.toFixed(2)} / limit ${Number(cfg.max_premium_exposure).toFixed(2)}`);
+  add('Global spread limit', badSpread === 0, badSpread ? `${badSpread} selected leg(s) exceed global spread limit ${Number(cfg.max_spread_pct)}%` : `all selected legs within ${Number(cfg.max_spread_pct)}%`);
+  const age = ctx?.lastCandle?.timestamp ? Math.max(0,(Date.now()-new Date(ctx.lastCandle.timestamp).getTime())/1000) : Infinity;
+  add('Data freshness', age <= Number(cfg.stale_data_seconds), `candle age ${Number.isFinite(age)?age.toFixed(0):'unknown'}s / limit ${Number(cfg.stale_data_seconds)}s`);
+  const blocked = checks.some(x=>!x.pass);
+  return { blocked, reason: blocked ? 'PROJECTED_RISK_BLOCKED' : 'PROJECTED_RISK_PASSED', checks, metrics: { projected_max_quantity:maxQty, projected_premium_exposure:exposure, selected_legs:selected.length, candle_age_seconds:Number.isFinite(age)?age:null } };
 }
 
 async function optionChain(connection, strategy) {
@@ -325,6 +355,8 @@ async function closeOpenLegs(userId, campaign, chain, reason, scope = 'ALL') {
   const ordered = [...q.rows].sort((a, b) => closeRank(a) - closeRank(b) || Number(a.execution_rank) - Number(b.execution_rank));
   let realized = 0;
   const closed = [];
+  const updates = [];
+  // Resolve every exit price before mutating any leg. Then commit all leg exits atomically.
   for (const leg of ordered) {
     const row = chain.rows.find(x => (x.call_options?.instrument_key === leg.instrument_key) || (x.put_options?.instrument_key === leg.instrument_key));
     const market = row ? (row.call_options?.instrument_key === leg.instrument_key ? row.call_options.market_data : row.put_options.market_data) : null;
@@ -332,8 +364,14 @@ async function closeOpenLegs(userId, campaign, chain, reason, scope = 'ALL') {
     if (!Number.isFinite(price)) throw new Error('PAPER_EXIT_PRICE_UNAVAILABLE');
     const pnl = (leg.side === 'BUY' ? 1 : -1) * (price - Number(leg.entry_price)) * Number(leg.quantity);
     realized += pnl;
-    await db.query('UPDATE paper_campaign_legs SET status=$1, exit_price=$2, current_price=$2, pnl=$3, exit_at=now(), last_mark_at=now(), metadata=metadata || $4::jsonb WHERE id=$5 AND user_id=$6', ['CLOSED', price, pnl, JSON.stringify({ exit_reason: reason }), leg.id, userId]);
+    updates.push({ leg, price, pnl });
     closed.push({ leg_id: leg.leg_id, side: leg.side, option_type: leg.option_type, strike: Number(leg.strike), entry_price: Number(leg.entry_price), exit_price: price, quantity: Number(leg.quantity), pnl });
+  }
+  if (updates.length) {
+    await db.transaction(updates.map(({ leg, price, pnl }) => ({
+      sql: 'UPDATE paper_campaign_legs SET status=$1, exit_price=$2, current_price=$2, pnl=$3, exit_at=now(), last_mark_at=now(), metadata=metadata || $4::jsonb WHERE id=$5 AND user_id=$6 AND status=$7',
+      params: ['CLOSED', price, pnl, JSON.stringify({ exit_reason: reason }), leg.id, userId, 'OPEN']
+    })));
   }
   return { realized, closed };
 }
@@ -377,11 +415,6 @@ async function cycle(req, res, campaign) {
   const connection = await broker(req);
   const ctx = await marketContext(connection, strategyObj, req);
   const chain = await optionChain(connection, strategyObj);
-  const risk = await riskGate(userId, campaign, chain, ctx);
-  if (risk.blocked) {
-    await recordDecision(userId, campaign, strategyObj, ctx, 'RISK_BLOCKED', risk.reason, 'RISK_OVERRIDE', { action: 'BLOCK' }, { risk_checks: risk.checks, risk_metrics: risk.metrics });
-    return res.status(409).json({ ...(await state(userId, campaign.id)), cycle: { action: 'BLOCK', reason: risk.reason, risk: risk.metrics }, broker_orders_sent: false });
-  }
   const currentMinutes = nowIstMinutes();
   const start = minutesOf(strategyObj.start_time || '09:45');
   const squareOff = minutesOf(strategyObj.square_off || '15:15');
@@ -397,6 +430,13 @@ async function cycle(req, res, campaign) {
     await db.query('UPDATE paper_campaigns SET status=$1, closed_at=COALESCE(closed_at,now()), updated_at=now() WHERE id=$2 AND user_id=$3', ['CLOSED', campaign.id, userId]);
     await recordDecision(userId, campaign, strategyObj, ctx, 'CLOSED', 'SQUARE_OFF_TIME_REACHED_NO_POSITION', 'N/A', { action: 'NONE' }, {});
     return res.json({ ...(await state(userId, campaign.id)), cycle: { action: 'NONE', reason: 'SQUARE_OFF_TIME_REACHED_NO_POSITION' } });
+  }
+
+  // Risk never prevents an emergency square-off. It only gates new entries/rolls.
+  const risk = await riskGate(userId, campaign, chain, ctx);
+  if (risk.blocked) {
+    await recordDecision(userId, campaign, strategyObj, ctx, 'RISK_BLOCKED', risk.reason, 'RISK_OVERRIDE', { action: 'BLOCK' }, { risk_checks: risk.checks, risk_metrics: risk.metrics });
+    return res.status(409).json({ ...(await state(userId, campaign.id)), cycle: { action: 'BLOCK', reason: risk.reason, risk: risk.metrics }, broker_orders_sent: false });
   }
 
   const candleMinutes = candleIstMinutes(ctx.lastCandle.timestamp);
@@ -479,19 +519,10 @@ async function openNewStructure(req, res, campaign, strategy, connection, ctx, c
     selected.push(result);
   }
   selected.sort((a, b) => a.execution_rank - b.execution_rank);
-  const riskConfigQ = await db.query('SELECT * FROM risk_configs WHERE user_id=$1 LIMIT 1', [userId]);
-  const riskCfg = riskConfigQ.rows[0] || { max_position_quantity: 100000, max_premium_exposure: 1000000, max_spread_pct: 10 };
-  const spreadLimit = Number(riskCfg.max_spread_pct);
-  const badSpread = selected.find(x => Number.isFinite(spreadLimit) && spreadLimit > 0 && (!Number.isFinite(x.spreadPct) || x.spreadPct > spreadLimit));
-  if (badSpread) {
-    await recordDecision(userId, campaign, strategy, ctx, 'BLOCKED', 'ABNORMAL_SPREAD', 'CONFIRMED', { action: 'BLOCK' }, { instrument_key: badSpread.instrument_key, spread_pct: badSpread.spreadPct, max_spread_pct: spreadLimit });
-    return res.status(422).json({ ...(await state(userId, campaign.id)), cycle: { action: 'BLOCK', reason: 'ABNORMAL_SPREAD', instrument_key: badSpread.instrument_key, spread_pct: badSpread.spreadPct, max_spread_pct: spreadLimit }, broker_orders_sent: false });
-  }
-  const projectedMaxQty = Math.max(...selected.map(x => Number(x.quantity || 0)), 0);
-  const projectedPremium = selected.reduce((s, x) => s + Math.abs(Number(x.entry_price || 0) * Number(x.quantity || 0)), 0);
-  if (projectedMaxQty > Number(riskCfg.max_position_quantity) || projectedPremium > Number(riskCfg.max_premium_exposure)) {
-    await recordDecision(userId, campaign, strategy, ctx, 'BLOCKED', 'PROJECTED_RISK_LIMIT', 'CONFIRMED', { action: 'BLOCK' }, { projected_max_quantity: projectedMaxQty, max_position_quantity: Number(riskCfg.max_position_quantity), projected_premium_exposure: projectedPremium, max_premium_exposure: Number(riskCfg.max_premium_exposure) });
-    return res.status(422).json({ ...(await state(userId, campaign.id)), cycle: { action: 'BLOCK', reason: 'PROJECTED_RISK_LIMIT', projected_max_quantity: projectedMaxQty, projected_premium_exposure: projectedPremium }, broker_orders_sent: false });
+  const projectedRisk = await projectedRiskGate(userId, campaign, selected, ctx);
+  if (projectedRisk.blocked) {
+    await recordDecision(userId, campaign, strategy, ctx, 'BLOCKED', projectedRisk.reason, 'RISK_OVERRIDE', { action: 'BLOCK' }, { risk_checks: projectedRisk.checks, risk_metrics: projectedRisk.metrics, trigger });
+    return res.status(422).json({ ...(await state(userId, campaign.id)), cycle: { action: 'BLOCK', reason: projectedRisk.reason, risk: projectedRisk.metrics }, broker_orders_sent: false });
   }
   const seen = new Set();
   for (const leg of selected) {

@@ -9,32 +9,29 @@ const UNDERLYINGS = {
   'SENSEX': 'BSE_INDEX|SENSEX',
   'BANKEX': 'BSE_INDEX|BANKEX'
 };
+const EXPIRIES = new Set(['current_week', 'next_week', 'far_week', 'current_month', 'next_month', 'far_month']);
 
 export default async function(req, res) {
   const underlying = req.query?.underlying || 'NIFTY 50';
   const instrumentKey = UNDERLYINGS[underlying];
-  if (!instrumentKey) return res.status(400).json({ error: 'Unsupported underlying.' });
+  const expiryRequest = req.query?.expiry || 'current_week';
+  if (!instrumentKey) return res.status(400).json({ error: 'UNSUPPORTED_UNDERLYING' });
+  if (!EXPIRIES.has(expiryRequest) && !/^\d{4}-\d{2}-\d{2}$/.test(expiryRequest)) return res.status(400).json({ error: 'INVALID_EXPIRY' });
 
   const { rows } = await db.query('SELECT access_token, expires_at, status FROM broker_connections WHERE user_id = $1', [req.user.id]);
   const connection = rows[0];
-  if (!connection || connection.status !== 'CONNECTED' || !connection.access_token) {
-    return res.status(409).json({ error: 'UPSTOX_NOT_CONNECTED' });
-  }
-  if (connection.expires_at && new Date(connection.expires_at).getTime() <= Date.now()) {
-    return res.status(409).json({ error: 'UPSTOX_TOKEN_EXPIRED' });
-  }
+  if (!connection || connection.status !== 'CONNECTED' || !connection.access_token) return res.status(409).json({ error: 'UPSTOX_NOT_CONNECTED' });
+  if (connection.expires_at && new Date(connection.expires_at).getTime() <= Date.now()) return res.status(409).json({ error: 'UPSTOX_TOKEN_EXPIRED' });
 
   const headers = { Accept: 'application/json', Authorization: 'Bearer ' + connection.access_token };
-  const url = 'https://api.upstox.com/v2/option/chain?instrument_key=' + encodeURIComponent(instrumentKey) + '&expiry_date=current_week';
+  const url = 'https://api.upstox.com/v2/option/chain?instrument_key=' + encodeURIComponent(instrumentKey) + '&expiry_date=' + encodeURIComponent(expiryRequest);
   const r = await fetch(url, { headers });
   const data = await r.json().catch(() => ({}));
   if (r.status === 401) {
     await db.query("UPDATE broker_connections SET status='EXPIRED', updated_at=now() WHERE user_id=$1", [req.user.id]);
     return res.status(401).json({ error: 'UPSTOX_TOKEN_EXPIRED' });
   }
-  if (!r.ok || data.status !== 'success') {
-    return res.status(502).json({ error: 'UPSTOX_MARKET_DATA_FAILED', upstream_status: r.status });
-  }
+  if (!r.ok || data.status !== 'success') return res.status(502).json({ error: 'UPSTOX_MARKET_DATA_FAILED', upstream_status: r.status });
 
   const rowsData = Array.isArray(data.data) ? data.data : [];
   const spot = rowsData[0]?.underlying_spot_price ?? null;
@@ -45,5 +42,5 @@ export default async function(req, res) {
     put: x.put_options ? { instrument_key: x.put_options.instrument_key, market: x.put_options.market_data || {}, greeks: x.put_options.option_greeks || {} } : null
   }));
 
-  return res.json({ source: 'UPSTOX', underlying, instrument_key: instrumentKey, expiry, spot, contracts });
+  return res.json({ source: 'UPSTOX', as_of: new Date().toISOString(), underlying, instrument_key: instrumentKey, expiry_request: expiryRequest, expiry, spot, count: contracts.length, contracts });
 }

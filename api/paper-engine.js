@@ -181,7 +181,7 @@ async function riskGate(userId, campaign, chain, ctx) {
   add('Campaign loss', total > -Number(cfg.max_campaign_loss), `total ${total.toFixed(2)} / floor -${Number(cfg.max_campaign_loss).toFixed(2)}`);
   add('Position quantity', maxQty <= Number(cfg.max_position_quantity), `max open qty ${maxQty} / limit ${Number(cfg.max_position_quantity)}`);
   // Roll count is enforced at the actual roll decision, not on ordinary entries.
-  add('Roll count', rolls <= Number(cfg.max_rolls), `rolls ${rolls} / limit ${Number(cfg.max_rolls)}`);
+  add('Roll count', rolls < Number(cfg.max_rolls), `rolls ${rolls} / maximum allowed ${Number(cfg.max_rolls)} before another roll`);
   add('Premium exposure', grossPremium <= Number(cfg.max_premium_exposure), `gross ${grossPremium.toFixed(2)} / limit ${Number(cfg.max_premium_exposure).toFixed(2)}`);
   add('Data freshness', age <= Number(cfg.stale_data_seconds), `candle age ${Number.isFinite(age)?age.toFixed(0):'unknown'}s / limit ${Number(cfg.stale_data_seconds)}s`);
   const blocked = checks.some(x=>!x.pass);

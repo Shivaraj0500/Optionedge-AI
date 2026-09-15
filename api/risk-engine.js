@@ -34,6 +34,11 @@ async function evaluate(userId, campaignId = null) {
   add('Kill switch', !cfg.kill_switch, cfg.kill_switch ? 'Kill switch is ACTIVE; new paper entries and rolls are blocked.' : 'Kill switch is inactive.');
   if (!campaign) return { status: cfg.kill_switch ? 'EMERGENCY' : 'SAFE', config: cfg, campaign: null, checks, metrics: {}, decision: cfg.kill_switch ? 'BLOCK' : 'ALLOW' };
 
+  add('Recovery state', !campaign.recovery_required, campaign.recovery_required ? 'Campaign is flagged for recovery; automated cycles must remain blocked.' : 'No recovery flag is set.');
+  const orphanQ = await db.query('SELECT COUNT(*)::int AS count FROM paper_campaign_legs WHERE campaign_id=$1 AND user_id=$2 AND status=\'OPEN\'', [campaign.id, userId]);
+  const openCount = Number(orphanQ.rows[0]?.count || 0);
+  add('Campaign/leg consistency', campaign.status === 'RUNNING' || openCount === 0, openCount && campaign.status !== 'RUNNING' ? `Non-running campaign has ${openCount} open leg(s).` : 'Campaign status and open-leg state are consistent.');
+
   const legsQ = await db.query('SELECT * FROM paper_campaign_legs WHERE campaign_id=$1 AND user_id=$2 ORDER BY execution_rank', [campaign.id, userId]);
   const legs = legsQ.rows;
   const open = legs.filter(x => x.status === 'OPEN');

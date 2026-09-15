@@ -46,6 +46,18 @@ export default async function (req, res) {
   if (!legs.some(l => l.option_type === 'PE')) warnings.push('No PE leg configured.');
   legs.forEach((leg, idx) => errors.push(...validateLeg(leg, idx)));
 
+  // Execution priority is canonical and independent of the order in which
+  // legs were added to the builder. Long option protection is always
+  // established before any short leg is permitted to execute.
+  const executionSequence = [
+    'BUY CE',
+    'BUY PE',
+    'SELL CE',
+    'SELL PE'
+  ];
+  const unknownExecutionLegs = legs.filter(l => !executionSequence.includes(`${l.side} ${l.option_type}`));
+  if (unknownExecutionLegs.length) errors.push('Every option leg must be BUY/SELL CE/PE so the canonical execution sequence can be enforced.');
+
   const primary = legs.filter(l => l.role === 'PRIMARY');
   const hedge = legs.filter(l => l.role === 'HEDGE');
   if (hedge.length > 0 && primary.length === 0) errors.push('Hedge legs require at least one primary leg.');
@@ -61,5 +73,5 @@ export default async function (req, res) {
     [req.user.id, valid ? 'STRATEGY_VALIDATED' : 'STRATEGY_VALIDATION_FAILED', 'strategy', strategyId, JSON.stringify({ errors, warnings })]
   );
 
-  res.json({ valid, status: valid ? 'VALIDATED' : 'DRAFT', errors, warnings, notes: ['No live order execution is enabled at this gate.', 'Option selection is configuration-validated only; broker/exchange contract validation is a later market-data gate.'] });
+  res.json({ valid, status: valid ? 'VALIDATED' : 'DRAFT', errors, warnings, execution_sequence: executionSequence, notes: ['No live order execution is enabled at this gate.', 'Option selection is configuration-validated only; broker/exchange contract validation is a later market-data gate.', 'Future multi-leg execution must pre-resolve every leg successfully, then execute strictly in this order: BUY CE → BUY PE → SELL CE → SELL PE. If any required precondition or leg fails, later legs must not be sent.'] });
 }

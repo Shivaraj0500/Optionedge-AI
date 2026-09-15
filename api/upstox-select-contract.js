@@ -14,6 +14,20 @@ const METHODS = new Set(['ATM', 'STRIKE_OFFSET', 'PREMIUM', 'DELTA', 'CUSTOM_STR
 const TYPES = new Set(['CE', 'PE']);
 const DISTANCES = new Set(['ATM', 'ITM', 'OTM']);
 
+// Canonical multi-leg execution priority. This is deliberately fixed so that
+// a future execution layer cannot accidentally send short legs before the
+// protective long legs are established.
+const EXECUTION_SEQUENCE = [
+  { side: 'BUY', option_type: 'CE', rank: 1, label: 'BUY CE' },
+  { side: 'BUY', option_type: 'PE', rank: 2, label: 'BUY PE' },
+  { side: 'SELL', option_type: 'CE', rank: 3, label: 'SELL CE' },
+  { side: 'SELL', option_type: 'PE', rank: 4, label: 'SELL PE' }
+];
+
+function executionRule(side, optionType) {
+  return EXECUTION_SEQUENCE.find(x => x.side === side && x.option_type === optionType) || null;
+}
+
 const num = (v, fallback = 0) => {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
@@ -76,9 +90,11 @@ export default async function(req, res) {
   const underlying = q.underlying || 'NIFTY 50';
   const expiryRequest = q.expiry || 'current_week';
   const optionType = q.option_type || 'CE';
+  const side = q.side === 'BUY' ? 'BUY' : 'SELL';
   const method = q.selection_method || 'ATM';
   const distanceMode = q.distance_mode || 'ATM';
   const instrumentKey = UNDERLYINGS[underlying];
+  const execution = executionRule(side, optionType);
 
   if (!instrumentKey) return res.status(400).json({ error: 'UNSUPPORTED_UNDERLYING' });
   if (!EXPIRIES.has(expiryRequest) && !/^\d{4}-\d{2}-\d{2}$/.test(expiryRequest)) return res.status(400).json({ error: 'INVALID_EXPIRY' });
@@ -232,6 +248,12 @@ export default async function(req, res) {
     expiry,
     spot,
     option_type: optionType,
+    side,
+    execution_sequence: execution ? {
+      rank: execution.rank,
+      label: execution.label,
+      rule: 'BUY CE > BUY PE > SELL CE > SELL PE'
+    } : null,
     selection_method: method,
     selection_target: selectionTarget,
     filters: { min_oi: minOi, min_volume: minVolume, max_spread_pct: maxSpreadPct, distance_mode: distanceMode },

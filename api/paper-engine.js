@@ -180,8 +180,11 @@ async function riskGate(userId, campaign, chain, ctx) {
   add('Daily loss', daily > -Number(cfg.max_daily_loss), `daily ${daily.toFixed(2)} / floor -${Number(cfg.max_daily_loss).toFixed(2)}`);
   add('Campaign loss', total > -Number(cfg.max_campaign_loss), `total ${total.toFixed(2)} / floor -${Number(cfg.max_campaign_loss).toFixed(2)}`);
   add('Position quantity', maxQty <= Number(cfg.max_position_quantity), `max open qty ${maxQty} / limit ${Number(cfg.max_position_quantity)}`);
-  // Roll count is enforced at the actual roll decision, not on ordinary entries.
-  add('Roll count', rolls < Number(cfg.max_rolls), `rolls ${rolls} / maximum allowed ${Number(cfg.max_rolls)} before another roll`);
+  // Roll count is enforced at the actual roll decision, not on ordinary
+  // entries or ordinary active-position management. Reaching max_rolls must
+  // not freeze MTM/hold/square-off of the existing structure.
+  const rollLimitReached = rolls >= Number(cfg.max_rolls);
+  add('Roll count', true, `rolls ${rolls} / maximum allowed ${Number(cfg.max_rolls)} before another roll${rollLimitReached ? ' (limit reached; further rolls blocked)' : ''}`);
   add('Premium exposure', grossPremium <= Number(cfg.max_premium_exposure), `gross ${grossPremium.toFixed(2)} / limit ${Number(cfg.max_premium_exposure).toFixed(2)}`);
   add('Data freshness', age <= Number(cfg.stale_data_seconds), `candle age ${Number.isFinite(age)?age.toFixed(0):'unknown'}s / limit ${Number(cfg.stale_data_seconds)}s`);
   const blocked = checks.some(x=>!x.pass);
@@ -485,6 +488,15 @@ async function cycle(req, res, campaign) {
     const recentRollCandles = ctx.completedCandles.slice(-rollConfirmations);
     const confirmedBreach = breach && recentRollCandles.length === rollConfirmations && recentRollCandles.every(c => c.close > upper || c.close < lower);
     if (confirmedBreach && strategyObj.roll_mode === 'CLOSED_CANDLE_OUTSIDE_CORRIDOR') {
+      // Enforce max_rolls only at the actual roll decision. The risk gate above
+      // intentionally does not block ordinary MTM/hold/square-off management.
+      const maxRolls = Number((await db.query('SELECT max_rolls FROM risk_configs WHERE user_id=$1 LIMIT 1', [userId])).rows[0]?.max_rolls ?? 5);
+      const rollCountQ = await db.query("SELECT COUNT(*)::int AS count FROM paper_decisions WHERE campaign_id=$1 AND user_id=$2 AND status='ROLL'", [campaign.id, userId]);
+      const currentRolls = Number(rollCountQ.rows[0]?.count || 0);
+      if (currentRolls >= maxRolls) {
+        await recordDecision(userId, campaign, strategyObj, ctx, 'ACTIVE', 'MAX_ROLLS_REACHED', 'RISK_OVERRIDE', { action: 'HOLD' }, { mtm_pnl: marks.mtm, confirmed_breach: true, rolls: currentRolls, max_rolls: maxRolls });
+        return res.json({ ...(await state(userId, campaign.id)), cycle: { action: 'HOLD', reason: 'MAX_ROLLS_REACHED', rolls: currentRolls, max_rolls: maxRolls } });
+      }
       // A roll is a complete structure replacement. Never leave an old hedge
       // orphaned while replacing the short legs. Also guard against repeating
       // the same roll on every 30-second poll of the same completed candle.

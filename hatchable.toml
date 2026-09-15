@@ -37,3 +37,15 @@ write = "own"
 [db.tables.audit_events]
 read = "own"
 write = "own"
+
+[db.tables.paper_campaigns]
+read = "own"
+write = "own"
+
+[db.tables.paper_campaign_legs]
+read = "own"
+write = "own"
+
+[db.tables.paper_decisions]
+read = "own"
+write = "own"

@@ -1,0 +1,1 @@
+ALTER TABLE paper_campaigns ADD COLUMN IF NOT EXISTS entry_spot NUMERIC

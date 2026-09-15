@@ -1,0 +1,1 @@
+CREATE INDEX IF NOT EXISTS paper_campaign_legs_campaign_status_idx ON paper_campaign_legs (campaign_id, status, entry_at)

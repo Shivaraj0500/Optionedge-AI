@@ -107,7 +107,10 @@ async function broker(req) {
   const { rows } = await db.query('SELECT access_token, expires_at, status FROM broker_connections WHERE user_id = $1', [req.user.id]);
   const c = rows[0];
   if (!c || c.status !== 'CONNECTED' || !c.access_token) throw new Error('UPSTOX_NOT_CONNECTED');
-  if (c.expires_at && new Date(c.expires_at).getTime() <= Date.now()) throw new Error('UPSTOX_TOKEN_EXPIRED');
+  if (c.expires_at && new Date(c.expires_at).getTime() <= Date.now()) {
+    await db.query("UPDATE broker_connections SET status='EXPIRED', updated_at=now() WHERE user_id=$1", [req.user.id]);
+    throw new Error('UPSTOX_TOKEN_EXPIRED');
+  }
   return c;
 }
 
@@ -206,7 +209,7 @@ async function projectedRiskGate(userId, campaign, selected, ctx) {
   return { blocked, reason: blocked ? 'PROJECTED_RISK_BLOCKED' : 'PROJECTED_RISK_PASSED', checks, metrics: { projected_max_quantity:maxQty, projected_premium_exposure:exposure, selected_legs:selected.length, candle_age_seconds:Number.isFinite(age)?age:null } };
 }
 
-async function optionChain(connection, strategy) {
+async function optionChain(connection, strategy, userId) {
   const instrumentKey = UNDERLYINGS[strategy.underlying];
   const expiryRequest = strategy.option_expiry || 'current_week';
   if (!ALLOWED_EXPIRIES.has(expiryRequest) && !/^\d{4}-\d{2}-\d{2}$/.test(expiryRequest)) throw new Error('INVALID_EXPIRY');
@@ -217,7 +220,10 @@ async function optionChain(connection, strategy) {
   // the configured expiry once, then use that exact date for both data sets.
   const contractResponse = await fetch('https://api.upstox.com/v2/option/contract?instrument_key=' + encodeURIComponent(instrumentKey) + '&expiry_date=' + encodeURIComponent(expiryRequest), { headers });
   const contractData = await contractResponse.json().catch(() => ({}));
-  if (contractResponse.status === 401) throw new Error('UPSTOX_TOKEN_EXPIRED');
+  if (contractResponse.status === 401) {
+    await db.query("UPDATE broker_connections SET status='EXPIRED', updated_at=now() WHERE user_id=$1", [userId]);
+    throw new Error('UPSTOX_TOKEN_EXPIRED');
+  }
   if (!contractResponse.ok || contractData.status !== 'success' || !Array.isArray(contractData.data) || !contractData.data.length) throw new Error('UPSTOX_OPTION_CONTRACTS_FAILED');
   const contracts = contractData.data;
   const expiry = contracts.map(x => x.expiry).filter(Boolean).sort()[0];
@@ -414,7 +420,7 @@ async function cycle(req, res, campaign) {
   const strategyObj = { ...strategy, adx_threshold: Number(strategy.adx_threshold), atr_multiplier: Number(strategy.atr_multiplier), regime_rule: strategy.regime_rule || {}, leg_config: strategy.leg_config || [] };
   const connection = await broker(req);
   const ctx = await marketContext(connection, strategyObj, req);
-  const chain = await optionChain(connection, strategyObj);
+  const chain = await optionChain(connection, strategyObj, req.user.id);
   const currentMinutes = nowIstMinutes();
   const start = minutesOf(strategyObj.start_time || '09:45');
   const squareOff = minutesOf(strategyObj.square_off || '15:15');
@@ -572,7 +578,7 @@ export default async function(req, res) {
     if (!versionQ.rows[0]) return res.status(409).json({ error: 'STRATEGY_VERSION_NOT_FOUND' });
     const pinned = versionQ.rows[0].config && typeof versionQ.rows[0].config === 'object' ? versionQ.rows[0].config : {};
     const stopStrategy = { ...strategyQ.rows[0], ...pinned, option_expiry: pinned.option_expiry || strategyQ.rows[0].option_expiry };
-    const chain = await optionChain(connection, stopStrategy);
+    const chain = await optionChain(connection, stopStrategy, userId);
     const isKill = action === 'KILL';
     const closeReason = isKill ? 'RISK_KILL_SWITCH' : 'USER_STOP';
     const result = await closeOpenLegs(userId, campaign, chain, closeReason);

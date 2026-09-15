@@ -52,7 +52,14 @@ export default async function(req, res) {
       profile = (await p.json()).data || {};
     } catch {}
 
-    const expires = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+    // Upstox access tokens expire at 3:30 AM on the following calendar day
+    // in India, regardless of when the token was issued.
+    const now = new Date();
+    const istNow = new Date(now.getTime() + 330 * 60 * 1000);
+    const y = istNow.getUTCFullYear();
+    const m = istNow.getUTCMonth();
+    const d = istNow.getUTCDate();
+    const expires = new Date(Date.UTC(y, m, d + 1, 22, 0, 0)).toISOString();
     await db.query(
       'INSERT INTO broker_connections (user_id, access_token, refresh_token, user_name, email, connected_at, expires_at, status, updated_at) VALUES ($1,$2,$3,$4,$5,now(),$6,$7,now()) ON CONFLICT (user_id) DO UPDATE SET access_token=EXCLUDED.access_token, refresh_token=EXCLUDED.refresh_token, user_name=EXCLUDED.user_name, email=EXCLUDED.email, connected_at=EXCLUDED.connected_at, expires_at=EXCLUDED.expires_at, status=EXCLUDED.status, updated_at=now()',
       [user.id, data.access_token, data.refresh_token || null, profile.user_name || profile.user_id || '', profile.email || user.email || '', expires, 'CONNECTED']

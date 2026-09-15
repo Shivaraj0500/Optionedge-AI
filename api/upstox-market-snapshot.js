@@ -36,10 +36,46 @@ export default async function(req, res) {
   const rowsData = Array.isArray(data.data) ? data.data : [];
   const spot = rowsData[0]?.underlying_spot_price ?? null;
   const expiry = rowsData[0]?.expiry ?? null;
+
+  // The option-chain response is the live market source. The contracts API is
+  // used only to enrich the same instrument keys with authoritative contract
+  // metadata such as lot size, tick size and trading symbol.
+  let metadata = [];
+  if (expiry && rowsData.length) {
+    const cr = await fetch(
+      'https://api.upstox.com/v2/option/contract?instrument_key=' + encodeURIComponent(instrumentKey) + '&expiry_date=' + encodeURIComponent(expiry),
+      { headers }
+    );
+    const cd = await cr.json().catch(() => ({}));
+    if (cr.status === 401) {
+      await db.query("UPDATE broker_connections SET status='EXPIRED', updated_at=now() WHERE user_id=$1", [req.user.id]);
+      return res.status(401).json({ error: 'UPSTOX_TOKEN_EXPIRED' });
+    }
+    if (cr.ok && cd.status === 'success' && Array.isArray(cd.data)) metadata = cd.data;
+  }
+
+  const metaByKey = new Map(metadata.map(x => [x.instrument_key, {
+    trading_symbol: x.trading_symbol,
+    instrument_type: x.instrument_type,
+    lot_size: x.lot_size,
+    minimum_lot: x.minimum_lot,
+    tick_size: x.tick_size,
+    freeze_quantity: x.freeze_quantity,
+    weekly: x.weekly
+  }]));
+
+  const normalize = option => option ? {
+    instrument_key: option.instrument_key,
+    market: option.market_data || {},
+    greeks: option.option_greeks || {},
+    contract: metaByKey.get(option.instrument_key) || null
+  } : null;
+
   const contracts = rowsData.map(x => ({
     strike: x.strike_price,
-    call: x.call_options ? { instrument_key: x.call_options.instrument_key, market: x.call_options.market_data || {}, greeks: x.call_options.option_greeks || {} } : null,
-    put: x.put_options ? { instrument_key: x.put_options.instrument_key, market: x.put_options.market_data || {}, greeks: x.put_options.option_greeks || {} } : null
+    pcr: x.pcr ?? null,
+    call: normalize(x.call_options),
+    put: normalize(x.put_options)
   }));
 
   return res.json({ source: 'UPSTOX', as_of: new Date().toISOString(), underlying, instrument_key: instrumentKey, expiry_request: expiryRequest, expiry, spot, count: contracts.length, contracts });

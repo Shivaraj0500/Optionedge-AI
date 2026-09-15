@@ -126,7 +126,26 @@ export default async function(req, res) {
   if (connection.expires_at && new Date(connection.expires_at).getTime() <= Date.now()) return res.status(409).json({ error: 'UPSTOX_TOKEN_EXPIRED' });
 
   const headers = { Accept: 'application/json', Authorization: 'Bearer ' + connection.access_token };
-  const chainUrl = 'https://api.upstox.com/v2/option/chain?instrument_key=' + encodeURIComponent(instrumentKey) + '&expiry_date=' + encodeURIComponent(expiryRequest);
+
+  // Option Contracts supports relative expiry keywords; Option Chain requires
+  // the resolved YYYY-MM-DD date. Resolve first so both APIs use the same expiry.
+  const contractsResponse = await fetch(
+    'https://api.upstox.com/v2/option/contract?instrument_key=' + encodeURIComponent(instrumentKey) + '&expiry_date=' + encodeURIComponent(expiryRequest),
+    { headers }
+  );
+  const contractsData = await contractsResponse.json().catch(() => ({}));
+  if (contractsResponse.status === 401) {
+    await db.query("UPDATE broker_connections SET status='EXPIRED', updated_at=now() WHERE user_id=$1", [req.user.id]);
+    return res.status(401).json({ error: 'UPSTOX_TOKEN_EXPIRED' });
+  }
+  if (!contractsResponse.ok || contractsData.status !== 'success' || !Array.isArray(contractsData.data) || !contractsData.data.length) {
+    return fail(res, 'NO_OPTION_CONTRACTS_FOR_EXPIRY', { underlying, expiry_request: expiryRequest });
+  }
+  const metadata = contractsData.data;
+  const expiry = metadata.map(x => x.expiry).filter(Boolean).sort()[0] || null;
+  if (!expiry) return fail(res, 'EXPIRY_RESOLUTION_FAILED', { underlying, expiry_request: expiryRequest });
+
+  const chainUrl = 'https://api.upstox.com/v2/option/chain?instrument_key=' + encodeURIComponent(instrumentKey) + '&expiry_date=' + encodeURIComponent(expiry);
   const chainResponse = await fetch(chainUrl, { headers });
   const chain = await chainResponse.json().catch(() => ({}));
   if (chainResponse.status === 401) {
@@ -137,22 +156,7 @@ export default async function(req, res) {
 
   const rowsData = Array.isArray(chain.data) ? chain.data : [];
   const spot = num(rowsData[0]?.underlying_spot_price, NaN);
-  const expiry = rowsData[0]?.expiry || null;
-  if (!Number.isFinite(spot) || !rowsData.length) return fail(res, 'NO_OPTION_CHAIN_DATA', { underlying, expiry_request: expiryRequest });
-
-  let metadata = [];
-  if (expiry) {
-    const contractsResponse = await fetch(
-      'https://api.upstox.com/v2/option/contract?instrument_key=' + encodeURIComponent(instrumentKey) + '&expiry_date=' + encodeURIComponent(expiry),
-      { headers }
-    );
-    const contractsData = await contractsResponse.json().catch(() => ({}));
-    if (contractsResponse.status === 401) {
-      await db.query("UPDATE broker_connections SET status='EXPIRED', updated_at=now() WHERE user_id=$1", [req.user.id]);
-      return res.status(401).json({ error: 'UPSTOX_TOKEN_EXPIRED' });
-    }
-    if (contractsResponse.ok && contractsData.status === 'success' && Array.isArray(contractsData.data)) metadata = contractsData.data;
-  }
+  if (!Number.isFinite(spot) || !rowsData.length) return fail(res, 'NO_OPTION_CHAIN_DATA', { underlying, expiry_request: expiryRequest, expiry });
   const metaByKey = new Map(metadata.map(x => [x.instrument_key, {
     trading_symbol: x.trading_symbol,
     instrument_type: x.instrument_type,

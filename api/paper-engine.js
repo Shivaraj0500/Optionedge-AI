@@ -153,17 +153,23 @@ async function optionChain(connection, strategy) {
   const expiryRequest = strategy.option_expiry || 'current_week';
   if (!ALLOWED_EXPIRIES.has(expiryRequest) && !/^\d{4}-\d{2}-\d{2}$/.test(expiryRequest)) throw new Error('INVALID_EXPIRY');
   const headers = { Accept: 'application/json', Authorization: 'Bearer ' + connection.access_token };
-  const chainResponse = await fetch('https://api.upstox.com/v2/option/chain?instrument_key=' + encodeURIComponent(instrumentKey) + '&expiry_date=' + encodeURIComponent(expiryRequest), { headers });
-  const chain = await chainResponse.json().catch(() => ({}));
-  if (chainResponse.status === 401) throw new Error('UPSTOX_TOKEN_EXPIRED');
-  if (!chainResponse.ok || chain.status !== 'success' || !Array.isArray(chain.data) || !chain.data.length) throw new Error('UPSTOX_OPTION_CHAIN_FAILED');
-  const expiry = chain.data[0]?.expiry;
+
+  // Upstox Option Contracts accepts relative expiry keywords, while the
+  // Put/Call Option Chain requires the resolved YYYY-MM-DD expiry. Resolve
+  // the configured expiry once, then use that exact date for both data sets.
   const contractResponse = await fetch('https://api.upstox.com/v2/option/contract?instrument_key=' + encodeURIComponent(instrumentKey) + '&expiry_date=' + encodeURIComponent(expiryRequest), { headers });
   const contractData = await contractResponse.json().catch(() => ({}));
   if (contractResponse.status === 401) throw new Error('UPSTOX_TOKEN_EXPIRED');
-  const contracts = contractResponse.ok && contractData.status === 'success' && Array.isArray(contractData.data) ? contractData.data : [];
+  if (!contractResponse.ok || contractData.status !== 'success' || !Array.isArray(contractData.data) || !contractData.data.length) throw new Error('UPSTOX_OPTION_CONTRACTS_FAILED');
+  const contracts = contractData.data;
+  const expiry = contracts.map(x => x.expiry).filter(Boolean).sort()[0];
+  if (!expiry) throw new Error('UPSTOX_EXPIRY_RESOLUTION_FAILED');
+  const chainResponse = await fetch('https://api.upstox.com/v2/option/chain?instrument_key=' + encodeURIComponent(instrumentKey) + '&expiry_date=' + encodeURIComponent(expiry), { headers });
+  const chain = await chainResponse.json().catch(() => ({}));
+  if (chainResponse.status === 401) throw new Error('UPSTOX_TOKEN_EXPIRED');
+  if (!chainResponse.ok || chain.status !== 'success' || !Array.isArray(chain.data) || !chain.data.length) throw new Error('UPSTOX_OPTION_CHAIN_FAILED');
   const metaByKey = new Map(contracts.map(x => [x.instrument_key, x]));
-  return { rows: chain.data, expiry, metaByKey, spot: num(chain.data[0]?.underlying_spot_price) };
+  return { rows: chain.data, expiry, expiry_request: expiryRequest, metaByKey, spot: num(chain.data[0]?.underlying_spot_price) };
 }
 
 function selectLeg(chain, strategy, leg) {
@@ -384,9 +390,17 @@ async function cycle(req, res, campaign) {
     const recentRollCandles = ctx.completedCandles.slice(-rollConfirmations);
     const confirmedBreach = breach && recentRollCandles.length === rollConfirmations && recentRollCandles.every(c => c.close > upper || c.close < lower);
     if (confirmedBreach && strategyObj.roll_mode === 'CLOSED_CANDLE_OUTSIDE_CORRIDOR') {
-      const result = await closeOpenLegs(userId, campaign, chain, 'CORRIDOR_BREACH_ROLL', 'SELL_ONLY');
+      // A roll is a complete structure replacement. Never leave an old hedge
+      // orphaned while replacing the short legs. Also guard against repeating
+      // the same roll on every 30-second poll of the same completed candle.
+      const priorRoll = await db.query('SELECT id FROM paper_decisions WHERE campaign_id=$1 AND user_id=$2 AND status=$3 AND candle_at=$4 LIMIT 1', [campaign.id, userId, 'ROLL', ctx.lastCandle.timestamp]);
+      if (priorRoll.rows.length) {
+        await recordDecision(userId, campaign, strategyObj, ctx, 'ACTIVE', 'ROLL_ALREADY_PROCESSED_FOR_CANDLE', 'ACTIVE_POSITION', { action: 'HOLD' }, { mtm_pnl: marks.mtm, confirmed_breach: true });
+        return res.json({ ...(await state(userId, campaign.id)), cycle: { action: 'HOLD', reason: 'ROLL_ALREADY_PROCESSED_FOR_CANDLE' } });
+      }
+      const result = await closeOpenLegs(userId, campaign, chain, 'CORRIDOR_BREACH_ROLL', 'ALL');
       await db.query('UPDATE paper_campaigns SET realized_pnl=COALESCE(realized_pnl,0)+$1, entry_spot=null, corridor_upper=null, corridor_lower=null, active_expiry=null, updated_at=now() WHERE id=$2 AND user_id=$3', [result.realized, campaign.id, userId]);
-      await recordDecision(userId, campaign, strategyObj, ctx, 'ROLL', 'CLOSED_CANDLE_OUTSIDE_CORRIDOR', 'ACTIVE_POSITION', { action: 'ROLL' }, { closed_legs: result.closed, mtm_before_roll: marks.mtm, realized_on_roll: result.realized });
+      await recordDecision(userId, campaign, strategyObj, ctx, 'ROLL', 'CLOSED_CANDLE_OUTSIDE_CORRIDOR', 'ACTIVE_POSITION', { action: 'ROLL' }, { closed_legs: result.closed, mtm_before_roll: marks.mtm, realized_on_roll: result.realized, note: 'Complete structure closed before new contracts were resolved.' });
       return await openNewStructure(req, res, campaign, strategyObj, connection, ctx, chain, 'ROLL_REENTRY');
     }
     const holdReason = breach && !confirmedBreach ? 'CORRIDOR_BREACH_NOT_CONFIRMED' : breach ? 'CORRIDOR_BREACH_DETECTED_BUT_ROLL_DISABLED' : 'POSITION_ACTIVE';
@@ -414,13 +428,14 @@ async function cycle(req, res, campaign) {
 
 async function openNewStructure(req, res, campaign, strategy, connection, ctx, chain, trigger) {
   const userId = req.user.id;
-  // On a corridor roll, retain existing BUY hedge legs and replace only SELL legs.
-  // A fresh ENTRY_SIGNAL resolves and opens the complete configured structure.
+  // Both a fresh entry and a roll resolve the complete configured structure.
+  // A roll has already closed every old leg, including hedges, so there is no
+  // retained contract that could become orphaned or mismatched with the new ATM.
   const rolling = trigger === 'ROLL_REENTRY';
   const configured = Array.isArray(strategy.leg_config)
-    ? strategy.leg_config.filter(x => x.enabled !== false && (!rolling || String(x.side).toUpperCase() === 'SELL'))
+    ? strategy.leg_config.filter(x => x.enabled !== false)
     : [];
-  if (!configured.length) return res.status(422).json({ error: rolling ? 'NO_ENABLED_SELL_LEGS_FOR_ROLL' : 'NO_ENABLED_STRATEGY_LEGS' });
+  if (!configured.length) return res.status(422).json({ error: 'NO_ENABLED_STRATEGY_LEGS' });
   const selected = [];
   for (const leg of configured) {
     const result = selectLeg(chain, strategy, leg);
@@ -445,16 +460,15 @@ async function openNewStructure(req, res, campaign, strategy, connection, ctx, c
   }
 
   const cycleId = crypto.randomUUID();
-  const inserted = [];
-  // All contracts are resolved before any simulated fill is recorded.
-  // Initial entry order: BUY CE -> BUY PE -> SELL CE -> SELL PE.
-  // Roll order: existing BUY hedges remain open; only newly resolved SELL legs are opened.
-  for (const leg of selected) {
-    const row = await db.query('INSERT INTO paper_campaign_legs (user_id,campaign_id,strategy_id,strategy_version,cycle_id,leg_id,role,side,option_type,execution_rank,expiry,strike,instrument_key,trading_symbol,lot_size,lots,quantity,entry_price,current_price,pnl,status,metadata) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$18,0,$19,$20) RETURNING *', [
-      userId, campaign.id, strategy.id, Number(strategy.version || 1), cycleId, leg.leg_id, leg.role, leg.side, leg.option_type, leg.execution_rank, leg.expiry, leg.strike, leg.instrument_key, leg.trading_symbol, leg.lot_size, leg.lots, leg.quantity, leg.entry_price, 'OPEN', JSON.stringify({ trigger, simulated: true, fill_basis: leg.side === 'BUY' ? 'ASK_OR_LTP' : 'BID_OR_LTP' })
-    ]);
-    inserted.push(row.rows[0]);
-  }
+  // All contracts are resolved and validated before any simulated fill is
+  // recorded. The transaction guarantees that a database failure cannot leave
+  // a partially-created multi-leg structure.
+  // Initial and roll entry order is always BUY CE -> BUY PE -> SELL CE -> SELL PE.
+  const statements = selected.map(leg => ({
+    sql: 'INSERT INTO paper_campaign_legs (user_id,campaign_id,strategy_id,strategy_version,cycle_id,leg_id,role,side,option_type,execution_rank,expiry,strike,instrument_key,trading_symbol,lot_size,lots,quantity,entry_price,current_price,pnl,status,metadata) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$18,0,$19,$20) RETURNING id',
+    params: [userId, campaign.id, strategy.id, Number(strategy.version || 1), cycleId, leg.leg_id, leg.role, leg.side, leg.option_type, leg.execution_rank, leg.expiry, leg.strike, leg.instrument_key, leg.trading_symbol, leg.lot_size, leg.lots, leg.quantity, leg.entry_price, 'OPEN', JSON.stringify({ trigger, simulated: true, fill_basis: leg.side === 'BUY' ? 'ASK_OR_LTP' : 'BID_OR_LTP' })]
+  }));
+  await db.transaction(statements);
   const upper = ctx.spot + Number(strategy.atr_multiplier) * ctx.indicator.atr;
   const lower = ctx.spot - Number(strategy.atr_multiplier) * ctx.indicator.atr;
   await db.query('UPDATE paper_campaigns SET strategy_version=$1, entry_spot=$2, corridor_upper=$3, corridor_lower=$4, active_expiry=$5, updated_at=now(), last_cycle_at=now(), last_status=$6, last_reason=$7 WHERE id=$8 AND user_id=$9', [Number(strategy.version || 1), ctx.spot, upper, lower, chain.expiry, 'ENTRY', trigger, campaign.id, userId]);

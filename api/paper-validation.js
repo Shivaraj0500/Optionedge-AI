@@ -31,8 +31,8 @@ export default async function(req, res) {
   add('Realized P&L reconciliation', Math.abs(closedPnl-recordedRealized) < 0.01, `Ledger closed P&L ${closedPnl.toFixed(2)} vs campaign ${recordedRealized.toFixed(2)}`);
   add('Total P&L reconciliation', Number.isFinite(recordedRealized + activePnl), `Realized ${recordedRealized.toFixed(2)} + open MTM ${activePnl.toFixed(2)} = ${(recordedRealized+activePnl).toFixed(2)}`);
 
-  const rollSellOnly = true;
-  add('Roll policy', rollSellOnly, 'Corridor roll closes SELL legs only; BUY hedge legs remain open.');
+  const rollCompleteStructure = true;
+  add('Roll policy', rollCompleteStructure, 'Corridor roll closes the complete existing structure — primary CE, primary PE, hedge CE, hedge PE — then resolves and establishes a fresh structure.');
   add('Entry execution policy', true, 'BUY CE → BUY PE → SELL CE → SELL PE; all contracts resolve before simulated fills.');
   add('Broker order safety', true, 'Paper mode records simulated fills only; no broker orders are submitted.');
   add('Square-off policy', true, 'Square-off closes all remaining legs; overnight is disabled by baseline configuration.');

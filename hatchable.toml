@@ -1,54 +1,16 @@
 [auth]
 enabled = true
 providers = ["email"]
-hosted_login = true
 
 [ai]
 required = true
+description = "Used for OptionEdge AI Risk Copilot. Bring a supported provider key."
 
-# Gemini provider is selected in the Hatchable AI provider settings.
-
-[[secret]]
-name = "UPSTOX_CLIENT_ID"
-expose = true
-
-[[secret]]
-name = "UPSTOX_CLIENT_SECRET"
-expose = true
-
-[db.tables.strategy_configs]
-read = "own"
-write = "own"
-
-[db.tables.strategy_versions]
-read = "own"
-write = "own"
-
-[db.tables.strategy_runs]
-read = "own"
-write = "own"
-
-[db.tables.paper_positions]
-read = "own"
-write = "own"
-
-[db.tables.broker_connections]
+[db.tables.ai_copilot_runs]
 read = "own"
 write = "own"
 
 [db.tables.audit_events]
-read = "own"
-write = "own"
-
-[db.tables.paper_campaigns]
-read = "own"
-write = "own"
-
-[db.tables.paper_campaign_legs]
-read = "own"
-write = "own"
-
-[db.tables.paper_decisions]
 read = "own"
 write = "own"
 
@@ -60,10 +22,38 @@ write = "own"
 read = "own"
 write = "own"
 
+[db.tables.broker_connections]
+read = "own"
+write = "own"
+
+[db.tables.paper_campaign_legs]
+read = "own"
+write = "own"
+
+[db.tables.paper_campaigns]
+read = "own"
+write = "own"
+
+[db.tables.paper_decisions]
+read = "own"
+write = "own"
+
+[db.tables.paper_positions]
+read = "own"
+write = "own"
+
 [db.tables.risk_configs]
 read = "own"
 write = "own"
 
-[db.tables.ai_copilot_runs]
+[db.tables.strategy_configs]
+read = "own"
+write = "own"
+
+[db.tables.strategy_runs]
+read = "own"
+write = "own"
+
+[db.tables.strategy_versions]
 read = "own"
 write = "own"

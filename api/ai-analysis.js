@@ -1,49 +1,47 @@
 import { ai, db } from 'hatchable';
 
 export const access = 'user';
-export const methods = ['POST'];
+export const methods = ['GET', 'POST'];
 
-function clean(value, fallback = null) {
-  if (value === undefined || value === null || value === '') return fallback;
-  return value;
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+async function generateWithRetry(opts) {
+  let lastError;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try { return await ai.generateText(opts); }
+    catch (error) {
+      lastError = error;
+      const message = String(error?.message || error || '');
+      const transient = /\b(429|500|502|503|504)\b|high demand|temporar|unavailable|overloaded/i.test(message);
+      if (!transient || attempt === 1) throw error;
+      await sleep(800);
+    }
+  }
+  throw lastError || new Error('AI_PROVIDER_UNAVAILABLE');
 }
 
 export default async function(req, res) {
-  const b = req.body || {};
-  const userId = req.user?.id;
+  const userId = req.user.id;
   try {
-    const strategyId = clean(b.strategy_id);
-    let strategy = null;
-    if (strategyId) {
-      const s = await db.query(`SELECT id,name,version,underlying,timeframe,candle_type,start_time,square_off,overnight_exposure,adx_period,adx_threshold,atr_period,atr_multiplier,confirmation_candles,regime_rule,leg_config,option_expiry FROM strategy_configs WHERE id=$1 AND user_id=$2 LIMIT 1`, [strategyId, userId]);
-      strategy = s.rows[0] || null;
-    }
-    const riskQ = await db.query(`SELECT max_daily_loss,max_campaign_loss,max_position_quantity,max_rolls,max_premium_exposure,max_spread_pct,stale_data_seconds,kill_switch FROM risk_configs WHERE user_id=$1 LIMIT 1`, [userId]);
-    const risk = riskQ.rows[0] || null;
-    const campaignQ = await db.query(`SELECT id,strategy_id,underlying,status,mode,strategy_version,entry_spot,corridor_upper,corridor_lower,active_expiry,last_status,last_reason,realized_pnl,started_at,updated_at FROM paper_campaigns WHERE user_id=$1 ORDER BY updated_at DESC LIMIT 1`, [userId]);
+    const strategyQ = await db.query('SELECT * FROM strategy_configs WHERE user_id=$1 ORDER BY updated_at DESC LIMIT 1', [userId]);
+    const strategy = strategyQ.rows[0] || null;
+    const campaignQ = await db.query('SELECT * FROM paper_campaigns WHERE user_id=$1 ORDER BY started_at DESC LIMIT 1', [userId]);
     const campaign = campaignQ.rows[0] || null;
-    let legs = [];
-    let decision = null;
-    if (campaign) {
-      const l = await db.query(`SELECT leg_id,role,side,option_type,execution_rank,strike,quantity,entry_price,current_price,pnl,status FROM paper_campaign_legs WHERE user_id=$1 AND campaign_id=$2 ORDER BY execution_rank`, [userId, campaign.id]);
-      legs = l.rows;
-      const d = await db.query(`SELECT candle_at,status,reason,regime,indicators,signal,details,cycle_at FROM paper_decisions WHERE user_id=$1 AND campaign_id=$2 ORDER BY cycle_at DESC LIMIT 1`, [userId, campaign.id]);
-      decision = d.rows[0] || null;
-    }
-    const bt = await db.query(`SELECT id,strategy_id,strategy_version,start_date,end_date,status,total_pnl,max_drawdown,win_rate,profit_factor,expectancy,avg_win,avg_loss,total_trades,winning_trades,losing_trades,rolls,total_structures,data_quality,engine_version,created_at FROM backtest_runs WHERE user_id=$1 ORDER BY created_at DESC LIMIT 3`, [userId]);
-
+    const riskQ = await db.query('SELECT * FROM risk_configs WHERE user_id=$1 LIMIT 1', [userId]);
+    const risk = riskQ.rows[0] || null;
+    const bt = await db.query('SELECT * FROM backtest_runs WHERE user_id=$1 ORDER BY created_at DESC LIMIT 5', [userId]);
+    const decisionQ = campaign ? await db.query('SELECT * FROM paper_decisions WHERE user_id=$1 AND campaign_id=$2 ORDER BY created_at DESC LIMIT 1', [userId, campaign.id]) : { rows: [] };
+    const decision = decisionQ.rows[0] || null;
     const context = {
-      strategy: strategy ? {...strategy, leg_config: strategy.leg_config} : null,
-      risk,
-      campaign: campaign ? {...campaign, realized_pnl: Number(campaign.realized_pnl || 0)} : null,
-      active_legs: legs.map(x => ({...x, strike:Number(x.strike), quantity:Number(x.quantity), pnl:Number(x.pnl || 0), entry_price:Number(x.entry_price), current_price:x.current_price == null ? null : Number(x.current_price)})),
-      latest_decision: decision ? {...decision, indicators: decision.indicators, signal: decision.signal} : null,
-      recent_backtests: bt.rows.map(x => ({...x, total_pnl:Number(x.total_pnl||0), max_drawdown:Number(x.max_drawdown||0), win_rate:x.win_rate==null?null:Number(x.win_rate), profit_factor:x.profit_factor==null?null:Number(x.profit_factor), expectancy:x.expectancy==null?null:Number(x.expectancy)})),
-      user_market_context: b.market_context || null
+      strategy: strategy ? { ...strategy, secret: undefined } : null,
+      campaign: campaign ? { id: campaign.id, status: campaign.status, strategy_id: campaign.strategy_id, strategy_version: campaign.strategy_version, realized_pnl: campaign.realized_pnl, last_status: campaign.last_status, last_reason: campaign.last_reason, last_cycle_at: campaign.last_cycle_at } : null,
+      risk: risk ? { ...risk, kill_switch: Boolean(risk.kill_switch) } : null,
+      latest_decision: decision,
+      backtests: bt.rows.map(r => ({ id:r.id, created_at:r.created_at, strategy_id:r.strategy_id, strategy_version:r.strategy_version, status:r.status, metrics:r.metrics }))
     };
-
     const prompt = `Analyze the following OptionEdge AI state as a conservative institutional risk/research copilot. Return ONLY valid JSON with exactly these keys: regime (string), thesis (string), risks (array of concise strings), safeguards (array of concise strings), confidence (string: HIGH/MEDIUM/LOW/INSUFFICIENT_DATA), next_step (string). Do not predict prices, promise returns, invent missing data, or place/authorize orders. Distinguish verified data from missing data. If live market context is absent, say so. The deterministic strategy and Risk Engine are authoritative; AI may explain or flag, but must never override them. A running paper campaign is simulation only.\n\nSTATE:\n${JSON.stringify(context)}`;
-    const r = await ai.generateText({ model: 'gemini', prompt, system: 'You are a risk-aware quantitative options research copilot. Valid JSON only. Never invent facts.', purpose: 'options-risk-copilot', userId });
+    const r = await generateWithRetry({ model: 'gemini', prompt, system: 'You are a risk-aware quantitative options research copilot. Valid JSON only. Never invent facts.', purpose: 'options-risk-copilot', userId });
+    if (r.finishReason === 'length' || r.finishReason === 'max_tokens') throw new Error('AI_RESPONSE_TRUNCATED');
     let text = (r.text || r.output || '').replace(/^```json\s*/, '').replace(/```$/, '').trim();
     const analysis = JSON.parse(text);
     const required = ['regime','thesis','risks','safeguards','confidence','next_step'];
@@ -51,8 +49,8 @@ export default async function(req, res) {
     const saved = await db.query(`INSERT INTO ai_copilot_runs (user_id,strategy_id,strategy_version,campaign_id,request_context,response,model) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id,created_at`, [userId, strategy?.id || null, strategy?.version || null, campaign?.id || null, JSON.stringify(context), JSON.stringify(analysis), r.model || 'gemini']);
     await db.query(`INSERT INTO audit_events (user_id,event_type,entity_type,entity_id,details) VALUES ($1,$2,$3,$4,$5)`, [userId, 'AI_COPILOT_ANALYSIS', 'ai_copilot_run', saved.rows[0].id, JSON.stringify({confidence:analysis.confidence, strategy_id:strategy?.id || null, campaign_id:campaign?.id || null})]);
     return res.json({ analysis, run_id: saved.rows[0].id, created_at: saved.rows[0].created_at, context_summary: {strategy_version:strategy?.version || null, campaign_status:campaign?.status || 'NONE', live_context_verified:Boolean(decision), backtests:bt.rows.length} });
-  } catch (e) {
-    console.error('AI copilot failed', e);
-    return res.status(502).json({ error: e.message === 'AI returned an invalid response contract' ? e.message : 'AI Risk Copilot is unavailable until the configured AI provider is available. No AI conclusion was stored.' });
+  } catch (error) {
+    console.error('AI copilot failed', error);
+    return res.status(502).json({ error: 'AI_COPILOT_UNAVAILABLE', detail: 'Configured AI provider is temporarily unavailable or returned an invalid response. No AI conclusion was stored.' });
   }
 }

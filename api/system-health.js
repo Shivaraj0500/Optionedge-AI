@@ -44,10 +44,22 @@ export default async function(req, res) {
   }
 
   try {
-    const q = await db.query("SELECT status, last_status, last_cycle_at FROM paper_campaigns WHERE user_id=$1 ORDER BY started_at DESC LIMIT 1", [req.user.id]);
+    const q = await db.query("SELECT id, status, last_status, last_cycle_at, recovery_required FROM paper_campaigns WHERE user_id=$1 ORDER BY started_at DESC LIMIT 1", [req.user.id]);
     const campaign = q.rows[0] || null;
-    if (!campaign) add('Paper engine', 'PASS', 'No paper campaign is currently recorded for this account.');
-    else add('Paper engine', 'PASS', `Latest campaign status: ${campaign.status || 'UNKNOWN'}.`);
+    if (!campaign) {
+      add('Paper engine', 'PASS', 'No paper campaign is currently recorded for this account.');
+    } else {
+      const openQ = await db.query("SELECT COUNT(*)::int AS count FROM paper_campaign_legs WHERE user_id=$1 AND campaign_id=$2 AND status='OPEN'", [req.user.id, campaign.id]);
+      const openLegs = Number(openQ.rows[0]?.count || 0);
+      const inconsistent = campaign.status !== 'RUNNING' && openLegs > 0;
+      if (campaign.recovery_required || inconsistent) {
+        add('Paper engine', 'BLOCKED', campaign.recovery_required
+          ? `Latest campaign is ${campaign.status || 'UNKNOWN'} and is flagged RECOVERY REQUIRED.`
+          : `Latest campaign is ${campaign.status || 'UNKNOWN'} but has ${openLegs} open simulated legs.`);
+      } else {
+        add('Paper engine', 'PASS', `Latest campaign status: ${campaign.status || 'UNKNOWN'}; open simulated legs: ${openLegs}.`);
+      }
+    }
   } catch (e) {
     add('Paper engine', 'BLOCKED', 'Paper campaign state could not be read.');
   }
@@ -58,7 +70,7 @@ export default async function(req, res) {
     if (!candleAt) add('Market-data freshness', 'WATCH', 'No paper-engine candle has been recorded yet.');
     else {
       const age = Math.max(0, (Date.now() - new Date(candleAt).getTime()) / 1000);
-      add('Market-data freshness', age <= 1800 ? 'PASS' : 'WATCH', `Latest recorded paper candle is ${Math.round(age)}s old.`);
+      add('Market-data freshness', age <= 300 ? 'PASS' : 'WATCH', `Latest recorded paper candle is ${Math.round(age)}s old; paper-engine freshness protection is stricter and may block stale cycles.`);
     }
   } catch (e) {
     add('Market-data freshness', 'WATCH', 'Freshness could not be evaluated because no paper decision state was available.');

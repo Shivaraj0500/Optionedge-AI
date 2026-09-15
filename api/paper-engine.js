@@ -277,11 +277,20 @@ async function markOpenLegs(userId, campaignId, chain) {
   return { mtm, legs: marked };
 }
 
+function closeRank(leg) {
+  // Roll/exit safety sequence is deliberately independent of entry rank:
+  // 1) primary CE, 2) primary PE, 3) hedge CE, 4) hedge PE.
+  const role = leg.role === 'HEDGE' ? 1 : 0;
+  const type = leg.option_type === 'CE' ? 0 : 1;
+  return role * 2 + type + 1;
+}
+
 async function closeOpenLegs(userId, campaign, chain, reason) {
   const q = await db.query('SELECT * FROM paper_campaign_legs WHERE user_id = $1 AND campaign_id = $2 AND status = $3 ORDER BY execution_rank', [userId, campaign.id, 'OPEN']);
+  const ordered = [...q.rows].sort((a, b) => closeRank(a) - closeRank(b) || Number(a.execution_rank) - Number(b.execution_rank));
   let realized = 0;
   const closed = [];
-  for (const leg of q.rows) {
+  for (const leg of ordered) {
     const row = chain.rows.find(x => (x.call_options?.instrument_key === leg.instrument_key) || (x.put_options?.instrument_key === leg.instrument_key));
     const market = row ? (row.call_options?.instrument_key === leg.instrument_key ? row.call_options.market_data : row.put_options.market_data) : null;
     const price = fillPrice(leg.side === 'BUY' ? 'SELL' : 'BUY', market || {});
@@ -357,6 +366,14 @@ async function cycle(req, res, campaign) {
   }
 
   if (openQ.rows.length) {
+    const expected = (Array.isArray(strategyObj.leg_config) ? strategyObj.leg_config : []).filter(x => x.enabled !== false);
+    const activeIds = new Set(openQ.rows.map(x => String(x.leg_id)));
+    const expectedIds = new Set(expected.map(x => String(x.id)));
+    const structureMismatch = expected.length !== openQ.rows.length || [...expectedIds].some(id => !activeIds.has(id));
+    if (structureMismatch) {
+      await recordDecision(userId, campaign, strategyObj, ctx, 'BLOCKED', 'STRUCTURE_INTEGRITY_MISMATCH', 'ACTIVE_POSITION', { action: 'BLOCK' }, { expected_leg_count: expected.length, active_leg_count: openQ.rows.length, expected_leg_ids: [...expectedIds], active_leg_ids: [...activeIds], note: 'No automatic repair or additional leg is created.' });
+      return res.status(409).json({ ...(await state(userId, campaign.id)), cycle: { action: 'BLOCK', reason: 'STRUCTURE_INTEGRITY_MISMATCH' }, broker_orders_sent: false });
+    }
     const marks = await markOpenLegs(userId, campaign.id, chain);
     const entrySpot = num(campaign.entry_spot);
     const upper = num(campaign.corridor_upper);

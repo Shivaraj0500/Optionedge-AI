@@ -595,20 +595,32 @@ export default async function(req, res) {
   }
 
   if (action === 'KILL' || action === 'STOP') {
-    const connection = await broker(req);
-    const strategyQ = await db.query('SELECT * FROM strategy_configs WHERE id=$1 AND user_id=$2 LIMIT 1', [campaign.strategy_id, userId]);
-    if (!strategyQ.rows[0]) return res.status(404).json({ error: 'STRATEGY_NOT_FOUND' });
-    const versionQ = await db.query('SELECT version_number, config FROM strategy_versions WHERE strategy_id=$1 AND user_id=$2 AND version_number=$3 LIMIT 1', [campaign.strategy_id, userId, Number(campaign.strategy_version || strategyQ.rows[0].version || 1)]);
-    if (!versionQ.rows[0]) return res.status(409).json({ error: 'STRATEGY_VERSION_NOT_FOUND' });
-    const pinned = versionQ.rows[0].config && typeof versionQ.rows[0].config === 'object' ? versionQ.rows[0].config : {};
-    const stopStrategy = { ...strategyQ.rows[0], ...pinned, option_expiry: pinned.option_expiry || strategyQ.rows[0].option_expiry };
-    const chain = await optionChain(connection, stopStrategy, userId);
     const isKill = action === 'KILL';
     const closeReason = isKill ? 'RISK_KILL_SWITCH' : 'USER_STOP';
-    const result = await closeOpenLegs(userId, campaign, chain, closeReason);
-    await db.query('UPDATE paper_campaigns SET status=$1, closed_at=now(), realized_pnl=COALESCE(realized_pnl,0)+$2, updated_at=now(), last_status=$3, last_reason=$4 WHERE id=$5 AND user_id=$6', ['STOPPED', result.realized, 'STOPPED', closeReason, campaign.id, userId]);
+
+    // Emergency controls must fail closed: never mark a campaign STOPPED unless
+    // every open simulated leg was successfully resolved and closed. KILL also
+    // latches the risk kill-switch on failure so a market-data/broker problem
+    // cannot accidentally permit a new cycle.
     if (isKill) await db.query('UPDATE risk_configs SET kill_switch=true, updated_at=now() WHERE user_id=$1', [userId]);
-    return res.json({ ...(await state(userId, campaign.id)), cycle: { action: isKill ? 'KILL' : 'STOP', reason: closeReason, closed: result.closed, broker_orders_sent: false } });
+
+    try {
+      const connection = await broker(req);
+      const strategyQ = await db.query('SELECT * FROM strategy_configs WHERE id=$1 AND user_id=$2 LIMIT 1', [campaign.strategy_id, userId]);
+      if (!strategyQ.rows[0]) return res.status(404).json({ error: 'STRATEGY_NOT_FOUND' });
+      const versionQ = await db.query('SELECT version_number, config FROM strategy_versions WHERE strategy_id=$1 AND user_id=$2 AND version_number=$3 LIMIT 1', [campaign.strategy_id, userId, Number(campaign.strategy_version || strategyQ.rows[0].version || 1)]);
+      if (!versionQ.rows[0]) return res.status(409).json({ error: 'STRATEGY_VERSION_NOT_FOUND' });
+      const pinned = versionQ.rows[0].config && typeof versionQ.rows[0].config === 'object' ? versionQ.rows[0].config : {};
+      const stopStrategy = { ...strategyQ.rows[0], ...pinned, option_expiry: pinned.option_expiry || strategyQ.rows[0].option_expiry };
+      const chain = await optionChain(connection, stopStrategy, userId);
+      const result = await closeOpenLegs(userId, campaign, chain, closeReason);
+      await db.query('UPDATE paper_campaigns SET status=$1, closed_at=now(), realized_pnl=COALESCE(realized_pnl,0)+$2, updated_at=now(), last_status=$3, last_reason=$4, cycle_lock_until=null WHERE id=$5 AND user_id=$6', ['STOPPED', result.realized, 'STOPPED', closeReason, campaign.id, userId]);
+      return res.json({ ...(await state(userId, campaign.id)), cycle: { action: isKill ? 'KILL' : 'STOP', reason: closeReason, closed: result.closed, broker_orders_sent: false, risk_kill_switch: isKill } });
+    } catch (error) {
+      const message = String(error?.message || 'PAPER_EMERGENCY_CLOSE_FAILED');
+      await db.query('UPDATE paper_campaigns SET last_cycle_at=now(), last_status=$1, last_reason=$2, updated_at=now(), cycle_lock_until=null WHERE id=$3 AND user_id=$4', ['EMERGENCY_CLOSE_FAILED', `${closeReason}:${message}`, campaign.id, userId]);
+      return res.status(502).json({ ...(await state(userId, campaign.id)), error: 'PAPER_EMERGENCY_CLOSE_FAILED', detail: message, action, closed: false, broker_orders_sent: false, risk_kill_switch: isKill });
+    }
   }
 
   if (campaign.status !== 'RUNNING') return res.status(409).json({ ...(await state(userId, campaign.id)), error: 'PAPER_CAMPAIGN_NOT_RUNNING' });

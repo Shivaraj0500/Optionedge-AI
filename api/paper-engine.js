@@ -145,10 +145,18 @@ async function marketContext(connection, strategy, req) {
   const indicator = calculateIndicators(basis, Number(strategy.adx_period), Number(strategy.atr_period));
   if (!indicator) throw new Error('INSUFFICIENT_CANDLES');
   const lastRaw = completedCandles[completedCandles.length - 1];
+  if (!lastRaw?.timestamp || !Number.isFinite(lastRaw.close)) throw new Error('MARKET_CONTEXT_INVALID');
+  const candleAgeSeconds = Math.max(0, (now - new Date(lastRaw.timestamp).getTime()) / 1000);
+  const timeframeSeconds = minutes * 60;
+  // A completed candle may legitimately be older than one timeframe on a
+  // non-trading interval, but it must never be older than two full candles
+  // while the strategy is being evaluated during its trading window.
+  const freshnessLimit = Math.max(120, timeframeSeconds * 2 + 30);
+  if (!Number.isFinite(candleAgeSeconds) || candleAgeSeconds > freshnessLimit) throw new Error('MARKET_DATA_STALE');
   const spot = lastRaw.close;
   const upper = spot + Number(strategy.atr_multiplier) * indicator.atr;
   const lower = spot - Number(strategy.atr_multiplier) * indicator.atr;
-  return { instrumentKey, minutes, completedCandles, indicator, spot, upper, lower, lastCandle: lastRaw };
+  return { instrumentKey, minutes, completedCandles, indicator, spot, upper, lower, lastCandle: lastRaw, candleAgeSeconds, freshnessLimit };
 }
 
 async function riskGate(userId, campaign, chain, ctx) {
@@ -341,7 +349,8 @@ async function markOpenLegs(userId, campaignId, chain) {
   for (const leg of q.rows) {
     const row = chain.rows.find(x => (x.call_options?.instrument_key === leg.instrument_key) || (x.put_options?.instrument_key === leg.instrument_key));
     const market = row ? (row.call_options?.instrument_key === leg.instrument_key ? row.call_options.market_data : row.put_options.market_data) : null;
-    const price = num(market?.ltp, num(leg.current_price, Number(leg.entry_price)));
+    const price = num(market?.ltp);
+    if (!Number.isFinite(price) || price < 0) throw new Error('PAPER_MARKET_DATA_MISSING');
     const pnl = (leg.side === 'BUY' ? 1 : -1) * (price - Number(leg.entry_price)) * Number(leg.quantity);
     mtm += pnl;
     await db.query('UPDATE paper_campaign_legs SET current_price=$1, pnl=$2, last_mark_at=now() WHERE id=$3 AND user_id=$4', [price, pnl, leg.id, userId]);
@@ -369,8 +378,9 @@ async function closeOpenLegs(userId, campaign, chain, reason, scope = 'ALL') {
   for (const leg of ordered) {
     const row = chain.rows.find(x => (x.call_options?.instrument_key === leg.instrument_key) || (x.put_options?.instrument_key === leg.instrument_key));
     const market = row ? (row.call_options?.instrument_key === leg.instrument_key ? row.call_options.market_data : row.put_options.market_data) : null;
-    const price = fillPrice(leg.side === 'BUY' ? 'SELL' : 'BUY', market || {});
-    if (!Number.isFinite(price)) throw new Error('PAPER_EXIT_PRICE_UNAVAILABLE');
+    if (!market) throw new Error('PAPER_EXIT_MARKET_DATA_MISSING');
+    const price = fillPrice(leg.side === 'BUY' ? 'SELL' : 'BUY', market);
+    if (!Number.isFinite(price) || price < 0) throw new Error('PAPER_EXIT_PRICE_UNAVAILABLE');
     const pnl = (leg.side === 'BUY' ? 1 : -1) * (price - Number(leg.entry_price)) * Number(leg.quantity);
     realized += pnl;
     updates.push({ leg, price, pnl });

@@ -49,3 +49,11 @@ write = "own"
 [db.tables.paper_decisions]
 read = "own"
 write = "own"
+
+[db.tables.backtest_runs]
+read = "own"
+write = "own"
+
+[db.tables.backtest_trades]
+read = "own"
+write = "own"

@@ -42,7 +42,7 @@ async function evaluate(userId, campaignId = null) {
   const legsQ = await db.query('SELECT * FROM paper_campaign_legs WHERE campaign_id=$1 AND user_id=$2 ORDER BY execution_rank', [campaign.id, userId]);
   const legs = legsQ.rows;
   const open = legs.filter(x => x.status === 'OPEN');
-  const todayQ = await db.query("SELECT COALESCE(SUM(pnl),0) AS pnl FROM paper_campaign_legs WHERE user_id=$1 AND status='CLOSED' AND entry_at >= CURRENT_DATE", [userId]);
+  const todayQ = await db.query("SELECT COALESCE(SUM(pnl),0) AS pnl FROM paper_campaign_legs WHERE user_id=$1 AND status='CLOSED' AND exit_at >= CURRENT_DATE", [userId]);
   const dailyRealized = Number(todayQ.rows[0]?.pnl || 0);
   const realized = Number(campaign.realized_pnl || 0);
   const openPnl = open.reduce((s, x) => s + Number(x.pnl || 0), 0);
@@ -58,7 +58,7 @@ async function evaluate(userId, campaignId = null) {
   add('Daily loss limit', dailyRealized > -n(cfg.max_daily_loss, DEFAULTS.max_daily_loss), `Daily realized P&L ${dailyRealized.toFixed(2)} vs floor -${n(cfg.max_daily_loss, DEFAULTS.max_daily_loss).toFixed(2)}`);
   add('Campaign loss limit', totalPnl > -n(cfg.max_campaign_loss, DEFAULTS.max_campaign_loss), `Campaign total P&L ${totalPnl.toFixed(2)} vs floor -${n(cfg.max_campaign_loss, DEFAULTS.max_campaign_loss).toFixed(2)}`);
   add('Position quantity limit', maxQty <= n(cfg.max_position_quantity, DEFAULTS.max_position_quantity), `Largest open leg quantity ${maxQty} vs max ${n(cfg.max_position_quantity, DEFAULTS.max_position_quantity)}`);
-  add('Roll limit', rolls <= n(cfg.max_rolls, DEFAULTS.max_rolls), `Rolls ${rolls} vs max ${n(cfg.max_rolls, DEFAULTS.max_rolls)}`);
+  add('Roll limit', rolls < n(cfg.max_rolls, DEFAULTS.max_rolls), `Rolls ${rolls} vs max ${n(cfg.max_rolls, DEFAULTS.max_rolls)}`);
   add('Premium exposure limit', grossPremium <= n(cfg.max_premium_exposure, DEFAULTS.max_premium_exposure), `Open gross premium notional ${grossPremium.toFixed(2)} vs max ${n(cfg.max_premium_exposure, DEFAULTS.max_premium_exposure).toFixed(2)}`);
   add('Market data freshness', age <= n(cfg.stale_data_seconds, DEFAULTS.stale_data_seconds), `Latest completed candle age ${Number.isFinite(age) ? age.toFixed(0) : 'unknown'}s vs max ${n(cfg.stale_data_seconds, DEFAULTS.stale_data_seconds)}s`);
 

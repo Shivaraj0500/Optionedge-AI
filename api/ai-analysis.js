@@ -48,7 +48,7 @@ export default async function(req, res) {
     const analysis = JSON.parse(text);
     const required = ['regime','thesis','risks','safeguards','confidence','next_step'];
     if (!required.every(k => Object.prototype.hasOwnProperty.call(analysis, k)) || !Array.isArray(analysis.risks) || !Array.isArray(analysis.safeguards)) throw new Error('AI returned an invalid response contract');
-    const saved = await db.query(`INSERT INTO ai_copilot_runs (user_id,strategy_id,strategy_version,campaign_id,request_context,response,model) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id,created_at`, [userId, strategy?.id || null, strategy?.version || null, campaign?.id || null, JSON.stringify(context), JSON.stringify(analysis), 'sonnet']);
+    const saved = await db.query(`INSERT INTO ai_copilot_runs (user_id,strategy_id,strategy_version,campaign_id,request_context,response,model) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id,created_at`, [userId, strategy?.id || null, strategy?.version || null, campaign?.id || null, JSON.stringify(context), JSON.stringify(analysis), r.model || 'gemini']);
     await db.query(`INSERT INTO audit_events (user_id,event_type,entity_type,entity_id,details) VALUES ($1,$2,$3,$4,$5)`, [userId, 'AI_COPILOT_ANALYSIS', 'ai_copilot_run', saved.rows[0].id, JSON.stringify({confidence:analysis.confidence, strategy_id:strategy?.id || null, campaign_id:campaign?.id || null})]);
     return res.json({ analysis, run_id: saved.rows[0].id, created_at: saved.rows[0].created_at, context_summary: {strategy_version:strategy?.version || null, campaign_status:campaign?.status || 'NONE', live_context_verified:Boolean(decision), backtests:bt.rows.length} });
   } catch (e) {

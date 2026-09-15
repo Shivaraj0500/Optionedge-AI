@@ -5,6 +5,16 @@ export const methods = ['GET'];
 
 const STALE_SECONDS = 300;
 
+function minutesOf(value) {
+  const [h, m] = String(value || '00:00').split(':').map(Number);
+  return (Number.isFinite(h) ? h : 0) * 60 + (Number.isFinite(m) ? m : 0);
+}
+
+function nowIstMinutes() {
+  const now = new Date(Date.now() + 330 * 60 * 1000);
+  return minutesOf(now.toISOString().slice(11, 16));
+}
+
 export default async function(req, res) {
   const userId = req.user.id;
   const q = await db.query("SELECT * FROM paper_campaigns WHERE user_id=$1 ORDER BY started_at DESC LIMIT 1", [userId]);
@@ -21,9 +31,35 @@ export default async function(req, res) {
   const errored = campaign.status === 'RUNNING' && (String(campaign.last_status || '').toUpperCase().includes('ERROR') || String(campaign.last_status || '').toUpperCase() === 'EMERGENCY_CLOSE_FAILED');
   const lockActive = campaign.cycle_lock_until && new Date(campaign.cycle_lock_until).getTime() > Date.now();
   const reasons = [];
-  if (stale) reasons.push('STALE_RUNNING_CAMPAIGN');
-  if (errored) reasons.push('LAST_CYCLE_ERROR');
-  if (campaign.recovery_required) reasons.push('RECOVERY_FLAGGED');
+
+  // A first-cycle MARKET_DATA_STALE outside the strategy window is a normal
+  // closed-market condition, not a trading-state failure. Only reconcile when
+  // there are zero open legs; never hide an unresolved position.
+  const lastReason = String(campaign.last_reason || '').toUpperCase();
+  const staleMarketFailure = campaign.status === 'RUNNING'
+    && (counts.OPEN || 0) === 0
+    && (lastReason === 'MARKET_DATA_STALE' || lastReason.includes('MARKET_DATA_STALE'));
+  let marketClosedReconciled = false;
+  if (staleMarketFailure) {
+    const strategyQ = await db.query('SELECT start_time, square_off FROM strategy_configs WHERE id=$1 AND user_id=$2 LIMIT 1', [campaign.strategy_id, userId]);
+    const strategy = strategyQ.rows[0] || {};
+    const nowMinutes = nowIstMinutes();
+    const startMinutes = minutesOf(strategy.start_time || '09:45');
+    const squareOffMinutes = minutesOf(strategy.square_off || '15:15');
+    const outsideWindow = nowMinutes < startMinutes || nowMinutes >= squareOffMinutes;
+    if (outsideWindow) {
+      await db.query("UPDATE paper_campaigns SET status='CLOSED', closed_at=now(), last_status='MARKET_CLOSED', last_reason='OUTSIDE_TRADING_WINDOW', cycle_lock_until=null, recovery_required=false, updated_at=now() WHERE id=$1 AND user_id=$2 AND status='RUNNING'", [campaign.id, userId]);
+      campaign.status = 'CLOSED';
+      campaign.last_status = 'MARKET_CLOSED';
+      campaign.last_reason = 'OUTSIDE_TRADING_WINDOW';
+      campaign.cycle_lock_until = null;
+      campaign.recovery_required = false;
+      marketClosedReconciled = true;
+    }
+  }
+  if (stale && !marketClosedReconciled) reasons.push('STALE_RUNNING_CAMPAIGN');
+  if (errored && !marketClosedReconciled) reasons.push('LAST_CYCLE_ERROR');
+  if (campaign.recovery_required && !marketClosedReconciled) reasons.push('RECOVERY_FLAGGED');
 
   const orphanOpenLegs = (campaign.status !== 'RUNNING') && (counts.OPEN || 0) > 0;
   // A newly-created RUNNING campaign legitimately has no cycle timestamp until

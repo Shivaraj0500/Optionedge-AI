@@ -586,6 +586,14 @@ export default async function(req, res) {
   const campaign = q.rows[0];
   if (!campaign) return res.status(404).json({ error: 'PAPER_CAMPAIGN_NOT_RUNNING' });
 
+  if (action !== 'KILL' && action !== 'STOP') {
+    // Claim the campaign for a short lease before running a cycle. The atomic
+    // UPDATE prevents overlapping browser polls from creating duplicate
+    // entries/rolls. A short lease also self-recovers if an isolate disappears.
+    const lock = await db.query('UPDATE paper_campaigns SET cycle_lock_until=now()+interval \'20 seconds\' WHERE id=$1 AND user_id=$2 AND status=\'RUNNING\' AND (cycle_lock_until IS NULL OR cycle_lock_until < now()) RETURNING id', [campaign.id, userId]);
+    if (!lock.rows.length) return res.status(409).json({ ...(await state(userId, campaign.id)), error: 'PAPER_CYCLE_ALREADY_RUNNING', broker_orders_sent: false });
+  }
+
   if (action === 'KILL' || action === 'STOP') {
     const connection = await broker(req);
     const strategyQ = await db.query('SELECT * FROM strategy_configs WHERE id=$1 AND user_id=$2 LIMIT 1', [campaign.strategy_id, userId]);
@@ -604,11 +612,14 @@ export default async function(req, res) {
   }
 
   if (campaign.status !== 'RUNNING') return res.status(409).json({ ...(await state(userId, campaign.id)), error: 'PAPER_CAMPAIGN_NOT_RUNNING' });
+  const cycleLocked = action !== 'KILL' && action !== 'STOP';
   try {
     return await cycle(req, res, campaign);
   } catch (error) {
     const message = String(error?.message || 'PAPER_ENGINE_ERROR');
     await db.query('UPDATE paper_campaigns SET last_cycle_at=now(), last_status=$1, last_reason=$2, updated_at=now() WHERE id=$3 AND user_id=$4', ['ERROR', message, campaign.id, userId]);
     return res.status(502).json({ ...(await state(userId, campaign.id)), error: message, broker_orders_sent: false });
+  } finally {
+    if (cycleLocked) await db.query('UPDATE paper_campaigns SET cycle_lock_until=null WHERE id=$1 AND user_id=$2', [campaign.id, userId]);
   }
 }

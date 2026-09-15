@@ -28,6 +28,14 @@ export default async function(req, res) {
   const activePnl = active.reduce((s,x)=>s+Number(x.pnl||0),0);
   const closedPnl = legs.filter(x=>x.status==='CLOSED').reduce((s,x)=>s+Number(x.pnl||0),0);
   const recordedRealized = Number(campaign.realized_pnl || 0);
+
+  const recoveryFlag = Boolean(campaign.recovery_required);
+  const openLegsOnClosedCampaign = active.length > 0 && campaign.status !== 'RUNNING';
+  add('Recovery state', !recoveryFlag && !openLegsOnClosedCampaign, recoveryFlag
+    ? 'Campaign is explicitly flagged recovery-required; automated cycles must remain blocked until the state is reconciled.'
+    : openLegsOnClosedCampaign
+      ? `Campaign status ${campaign.status} has ${active.length} open simulated legs; this is an orphan-state condition.`
+      : 'No recovery flag or orphaned open-leg condition recorded.');
   add('Realized P&L reconciliation', Math.abs(closedPnl-recordedRealized) < 0.01, `Ledger closed P&L ${closedPnl.toFixed(2)} vs campaign ${recordedRealized.toFixed(2)}`);
   add('Total P&L reconciliation', Number.isFinite(recordedRealized + activePnl), `Realized ${recordedRealized.toFixed(2)} + open MTM ${activePnl.toFixed(2)} = ${(recordedRealized+activePnl).toFixed(2)}`);
 

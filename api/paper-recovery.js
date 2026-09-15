@@ -23,6 +23,11 @@ export default async function(req, res) {
   if (errored) reasons.push('LAST_CYCLE_ERROR');
   if (campaign.recovery_required) reasons.push('RECOVERY_FLAGGED');
 
+  const orphanOpenLegs = (campaign.status !== 'RUNNING') && (counts.OPEN || 0) > 0;
+  const runningWithoutCycle = campaign.status === 'RUNNING' && !campaign.last_cycle_at;
+  if (orphanOpenLegs) reasons.push('OPEN_LEGS_ON_NON_RUNNING_CAMPAIGN');
+  if (runningWithoutCycle) reasons.push('RUNNING_CAMPAIGN_WITHOUT_CYCLE_TIMESTAMP');
+
   const required = reasons.length > 0;
   if (required !== Boolean(campaign.recovery_required)) {
     await db.query('UPDATE paper_campaigns SET recovery_required=$1, updated_at=now() WHERE id=$2 AND user_id=$3', [required, campaign.id, userId]);

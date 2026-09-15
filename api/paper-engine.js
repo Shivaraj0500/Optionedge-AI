@@ -230,7 +230,10 @@ async function optionChain(connection, strategy, userId) {
   if (!expiry) throw new Error('UPSTOX_EXPIRY_RESOLUTION_FAILED');
   const chainResponse = await fetch('https://api.upstox.com/v2/option/chain?instrument_key=' + encodeURIComponent(instrumentKey) + '&expiry_date=' + encodeURIComponent(expiry), { headers });
   const chain = await chainResponse.json().catch(() => ({}));
-  if (chainResponse.status === 401) throw new Error('UPSTOX_TOKEN_EXPIRED');
+  if (chainResponse.status === 401) {
+    await db.query("UPDATE broker_connections SET status='EXPIRED', updated_at=now() WHERE user_id=$1", [userId]);
+    throw new Error('UPSTOX_TOKEN_EXPIRED');
+  }
   if (!chainResponse.ok || chain.status !== 'success' || !Array.isArray(chain.data) || !chain.data.length) throw new Error('UPSTOX_OPTION_CHAIN_FAILED');
   const metaByKey = new Map(contracts.map(x => [x.instrument_key, x]));
   return { rows: chain.data, expiry, expiry_request: expiryRequest, metaByKey, spot: num(chain.data[0]?.underlying_spot_price) };
@@ -421,6 +424,9 @@ async function cycle(req, res, campaign) {
   const connection = await broker(req);
   const ctx = await marketContext(connection, strategyObj, req);
   const chain = await optionChain(connection, strategyObj, req.user.id);
+  if (!Number.isFinite(ctx.spot) || !ctx.lastCandle?.timestamp || !Number.isFinite(chain.spot)) {
+    throw new Error('MARKET_CONTEXT_INVALID');
+  }
   const currentMinutes = nowIstMinutes();
   const start = minutesOf(strategyObj.start_time || '09:45');
   const squareOff = minutesOf(strategyObj.square_off || '15:15');

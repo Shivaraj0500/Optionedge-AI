@@ -57,3 +57,7 @@ write = "own"
 [db.tables.backtest_trades]
 read = "own"
 write = "own"
+
+[db.tables.risk_configs]
+read = "own"
+write = "own"

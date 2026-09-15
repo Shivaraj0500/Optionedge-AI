@@ -479,6 +479,20 @@ async function openNewStructure(req, res, campaign, strategy, connection, ctx, c
     selected.push(result);
   }
   selected.sort((a, b) => a.execution_rank - b.execution_rank);
+  const riskConfigQ = await db.query('SELECT * FROM risk_configs WHERE user_id=$1 LIMIT 1', [userId]);
+  const riskCfg = riskConfigQ.rows[0] || { max_position_quantity: 100000, max_premium_exposure: 1000000, max_spread_pct: 10 };
+  const spreadLimit = Number(riskCfg.max_spread_pct);
+  const badSpread = selected.find(x => Number.isFinite(spreadLimit) && spreadLimit > 0 && (!Number.isFinite(x.spreadPct) || x.spreadPct > spreadLimit));
+  if (badSpread) {
+    await recordDecision(userId, campaign, strategy, ctx, 'BLOCKED', 'ABNORMAL_SPREAD', 'CONFIRMED', { action: 'BLOCK' }, { instrument_key: badSpread.instrument_key, spread_pct: badSpread.spreadPct, max_spread_pct: spreadLimit });
+    return res.status(422).json({ ...(await state(userId, campaign.id)), cycle: { action: 'BLOCK', reason: 'ABNORMAL_SPREAD', instrument_key: badSpread.instrument_key, spread_pct: badSpread.spreadPct, max_spread_pct: spreadLimit }, broker_orders_sent: false });
+  }
+  const projectedMaxQty = Math.max(...selected.map(x => Number(x.quantity || 0)), 0);
+  const projectedPremium = selected.reduce((s, x) => s + Math.abs(Number(x.entry_price || 0) * Number(x.quantity || 0)), 0);
+  if (projectedMaxQty > Number(riskCfg.max_position_quantity) || projectedPremium > Number(riskCfg.max_premium_exposure)) {
+    await recordDecision(userId, campaign, strategy, ctx, 'BLOCKED', 'PROJECTED_RISK_LIMIT', 'CONFIRMED', { action: 'BLOCK' }, { projected_max_quantity: projectedMaxQty, max_position_quantity: Number(riskCfg.max_position_quantity), projected_premium_exposure: projectedPremium, max_premium_exposure: Number(riskCfg.max_premium_exposure) });
+    return res.status(422).json({ ...(await state(userId, campaign.id)), cycle: { action: 'BLOCK', reason: 'PROJECTED_RISK_LIMIT', projected_max_quantity: projectedMaxQty, projected_premium_exposure: projectedPremium }, broker_orders_sent: false });
+  }
   const seen = new Set();
   for (const leg of selected) {
     if (seen.has(leg.instrument_key)) {
@@ -519,7 +533,7 @@ export default async function(req, res) {
   const campaign = q.rows[0];
   if (!campaign) return res.status(404).json({ error: 'PAPER_CAMPAIGN_NOT_RUNNING' });
 
-  if (action === 'STOP') {
+  if (action === 'KILL' || action === 'STOP') {
     const connection = await broker(req);
     const strategyQ = await db.query('SELECT * FROM strategy_configs WHERE id=$1 AND user_id=$2 LIMIT 1', [campaign.strategy_id, userId]);
     if (!strategyQ.rows[0]) return res.status(404).json({ error: 'STRATEGY_NOT_FOUND' });
@@ -528,9 +542,12 @@ export default async function(req, res) {
     const pinned = versionQ.rows[0].config && typeof versionQ.rows[0].config === 'object' ? versionQ.rows[0].config : {};
     const stopStrategy = { ...strategyQ.rows[0], ...pinned, option_expiry: pinned.option_expiry || strategyQ.rows[0].option_expiry };
     const chain = await optionChain(connection, stopStrategy);
-    const result = await closeOpenLegs(userId, campaign, chain, 'USER_STOP');
-    await db.query('UPDATE paper_campaigns SET status=$1, closed_at=now(), realized_pnl=COALESCE(realized_pnl,0)+$2, updated_at=now(), last_status=$3, last_reason=$4 WHERE id=$5 AND user_id=$6', ['STOPPED', result.realized, 'STOPPED', 'USER_STOP', campaign.id, userId]);
-    return res.json({ ...(await state(userId, campaign.id)), cycle: { action: 'STOP', reason: 'USER_STOP', closed: result.closed, broker_orders_sent: false } });
+    const isKill = action === 'KILL';
+    const closeReason = isKill ? 'RISK_KILL_SWITCH' : 'USER_STOP';
+    const result = await closeOpenLegs(userId, campaign, chain, closeReason);
+    await db.query('UPDATE paper_campaigns SET status=$1, closed_at=now(), realized_pnl=COALESCE(realized_pnl,0)+$2, updated_at=now(), last_status=$3, last_reason=$4 WHERE id=$5 AND user_id=$6', ['STOPPED', result.realized, 'STOPPED', closeReason, campaign.id, userId]);
+    if (isKill) await db.query('UPDATE risk_configs SET kill_switch=true, updated_at=now() WHERE user_id=$1', [userId]);
+    return res.json({ ...(await state(userId, campaign.id)), cycle: { action: isKill ? 'KILL' : 'STOP', reason: closeReason, closed: result.closed, broker_orders_sent: false } });
   }
 
   if (campaign.status !== 'RUNNING') return res.status(409).json({ ...(await state(userId, campaign.id)), error: 'PAPER_CAMPAIGN_NOT_RUNNING' });

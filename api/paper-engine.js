@@ -111,7 +111,7 @@ async function broker(req) {
   return c;
 }
 
-async function marketContext(connection, strategy) {
+async function marketContext(connection, strategy, req) {
   const instrumentKey = UNDERLYINGS[strategy.underlying];
   const minutes = TIMEFRAMES[strategy.timeframe];
   if (!instrumentKey || !minutes) throw new Error('INVALID_STRATEGY_MARKET_CONFIGURATION');
@@ -341,7 +341,7 @@ async function cycle(req, res, campaign) {
   const strategy = { ...strategyBase, ...versionConfig, id: strategyBase.id, version: Number(pinned.version_number), leg_config: versionConfig.legs || strategyBase.leg_config || [] };
   const strategyObj = { ...strategy, adx_threshold: Number(strategy.adx_threshold), atr_multiplier: Number(strategy.atr_multiplier), regime_rule: strategy.regime_rule || {}, leg_config: strategy.leg_config || [] };
   const connection = await broker(req);
-  const ctx = await marketContext(connection, strategyObj);
+  const ctx = await marketContext(connection, strategyObj, req);
   const chain = await optionChain(connection, strategyObj);
   const currentMinutes = nowIstMinutes();
   const start = minutesOf(strategyObj.start_time || '09:45');
@@ -380,14 +380,18 @@ async function cycle(req, res, campaign) {
     const upper = num(campaign.corridor_upper);
     const lower = num(campaign.corridor_lower);
     const breach = Number.isFinite(entrySpot) && Number.isFinite(upper) && Number.isFinite(lower) && (ctx.lastCandle.close > upper || ctx.lastCandle.close < lower);
-    if (breach && strategyObj.roll_mode === 'CLOSED_CANDLE_OUTSIDE_CORRIDOR') {
+    const rollConfirmations = Math.max(1, Number(strategyObj.confirmation_candles || 1));
+    const recentRollCandles = ctx.completedCandles.slice(-rollConfirmations);
+    const confirmedBreach = breach && recentRollCandles.length === rollConfirmations && recentRollCandles.every(c => c.close > upper || c.close < lower);
+    if (confirmedBreach && strategyObj.roll_mode === 'CLOSED_CANDLE_OUTSIDE_CORRIDOR') {
       const result = await closeOpenLegs(userId, campaign, chain, 'CORRIDOR_BREACH_ROLL', 'SELL_ONLY');
       await db.query('UPDATE paper_campaigns SET realized_pnl=COALESCE(realized_pnl,0)+$1, entry_spot=null, corridor_upper=null, corridor_lower=null, active_expiry=null, updated_at=now() WHERE id=$2 AND user_id=$3', [result.realized, campaign.id, userId]);
       await recordDecision(userId, campaign, strategyObj, ctx, 'ROLL', 'CLOSED_CANDLE_OUTSIDE_CORRIDOR', 'ACTIVE_POSITION', { action: 'ROLL' }, { closed_legs: result.closed, mtm_before_roll: marks.mtm, realized_on_roll: result.realized });
       return await openNewStructure(req, res, campaign, strategyObj, connection, ctx, chain, 'ROLL_REENTRY');
     }
-    await recordDecision(userId, campaign, strategyObj, ctx, 'ACTIVE', breach ? 'CORRIDOR_BREACH_DETECTED_BUT_ROLL_DISABLED' : 'POSITION_ACTIVE', 'ACTIVE_POSITION', { action: 'HOLD' }, { mtm_pnl: marks.mtm, corridor_breach: breach });
-    return res.json({ ...(await state(userId, campaign.id)), cycle: { action: 'HOLD', reason: breach ? 'CORRIDOR_BREACH_DETECTED_BUT_ROLL_DISABLED' : 'POSITION_ACTIVE' } });
+    const holdReason = breach && !confirmedBreach ? 'CORRIDOR_BREACH_NOT_CONFIRMED' : breach ? 'CORRIDOR_BREACH_DETECTED_BUT_ROLL_DISABLED' : 'POSITION_ACTIVE';
+    await recordDecision(userId, campaign, strategyObj, ctx, 'ACTIVE', holdReason, 'ACTIVE_POSITION', { action: 'HOLD' }, { mtm_pnl: marks.mtm, corridor_breach: breach, confirmed_breach: confirmedBreach, required_confirmations: rollConfirmations });
+    return res.json({ ...(await state(userId, campaign.id)), cycle: { action: 'HOLD', reason: holdReason } });
   }
 
   const basis = strategyObj.candle_type === 'HEIKIN_ASHI' ? heikinAshi(ctx.completedCandles) : ctx.completedCandles;

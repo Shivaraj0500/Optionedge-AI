@@ -148,6 +148,34 @@ async function marketContext(connection, strategy, req) {
   return { instrumentKey, minutes, completedCandles, indicator, spot, upper, lower, lastCandle: lastRaw };
 }
 
+async function riskGate(userId, campaign, chain, ctx) {
+  const q = await db.query('SELECT * FROM risk_configs WHERE user_id=$1 LIMIT 1', [userId]);
+  const cfg = q.rows[0] || { max_daily_loss: 50000, max_campaign_loss: 100000, max_position_quantity: 100000, max_rolls: 5, max_premium_exposure: 1000000, max_spread_pct: 10, stale_data_seconds: 1800, kill_switch: false };
+  const checks = [];
+  const add = (name, pass, detail) => checks.push({ name, pass, detail });
+  add('Kill switch', !cfg.kill_switch, cfg.kill_switch ? 'ACTIVE' : 'inactive');
+  const legsQ = await db.query('SELECT * FROM paper_campaign_legs WHERE campaign_id=$1 AND user_id=$2 AND status=$3', [campaign.id, userId, 'OPEN']);
+  const open = legsQ.rows;
+  const todayQ = await db.query("SELECT COALESCE(SUM(pnl),0) AS pnl FROM paper_campaign_legs WHERE user_id=$1 AND status='CLOSED' AND exit_at >= CURRENT_DATE", [userId]);
+  const daily = Number(todayQ.rows[0]?.pnl || 0);
+  const realized = Number(campaign.realized_pnl || 0);
+  const openPnl = open.reduce((s,x)=>s+Number(x.pnl||0),0);
+  const total = realized + openPnl;
+  const rollQ = await db.query("SELECT COUNT(*)::int AS count FROM paper_decisions WHERE campaign_id=$1 AND user_id=$2 AND status='ROLL'", [campaign.id,userId]);
+  const rolls = Number(rollQ.rows[0]?.count || 0);
+  const grossPremium = open.reduce((s,x)=>s+Math.abs(Number(x.entry_price||0)*Number(x.quantity||0)),0);
+  const maxQty = open.reduce((m,x)=>Math.max(m,Number(x.quantity||0)),0);
+  const age = ctx?.lastCandle?.timestamp ? Math.max(0,(Date.now()-new Date(ctx.lastCandle.timestamp).getTime())/1000) : Infinity;
+  add('Daily loss', daily > -Number(cfg.max_daily_loss), `daily ${daily.toFixed(2)} / floor -${Number(cfg.max_daily_loss).toFixed(2)}`);
+  add('Campaign loss', total > -Number(cfg.max_campaign_loss), `total ${total.toFixed(2)} / floor -${Number(cfg.max_campaign_loss).toFixed(2)}`);
+  add('Position quantity', maxQty <= Number(cfg.max_position_quantity), `max open qty ${maxQty} / limit ${Number(cfg.max_position_quantity)}`);
+  add('Roll count', rolls < Number(cfg.max_rolls), `rolls ${rolls} / limit ${Number(cfg.max_rolls)}`);
+  add('Premium exposure', grossPremium <= Number(cfg.max_premium_exposure), `gross ${grossPremium.toFixed(2)} / limit ${Number(cfg.max_premium_exposure).toFixed(2)}`);
+  add('Data freshness', age <= Number(cfg.stale_data_seconds), `candle age ${Number.isFinite(age)?age.toFixed(0):'unknown'}s / limit ${Number(cfg.stale_data_seconds)}s`);
+  const blocked = checks.some(x=>!x.pass);
+  return { blocked, reason: blocked ? 'RISK_GATE_BLOCKED' : 'RISK_GATE_PASSED', checks, metrics: { daily_realized: daily, campaign_total: total, rolls, gross_premium_exposure: grossPremium, max_open_quantity: maxQty, candle_age_seconds: Number.isFinite(age)?age:null } };
+}
+
 async function optionChain(connection, strategy) {
   const instrumentKey = UNDERLYINGS[strategy.underlying];
   const expiryRequest = strategy.option_expiry || 'current_week';
@@ -349,6 +377,11 @@ async function cycle(req, res, campaign) {
   const connection = await broker(req);
   const ctx = await marketContext(connection, strategyObj, req);
   const chain = await optionChain(connection, strategyObj);
+  const risk = await riskGate(userId, campaign, chain, ctx);
+  if (risk.blocked) {
+    await recordDecision(userId, campaign, strategyObj, ctx, 'RISK_BLOCKED', risk.reason, 'RISK_OVERRIDE', { action: 'BLOCK' }, { risk_checks: risk.checks, risk_metrics: risk.metrics });
+    return res.status(409).json({ ...(await state(userId, campaign.id)), cycle: { action: 'BLOCK', reason: risk.reason, risk: risk.metrics }, broker_orders_sent: false });
+  }
   const currentMinutes = nowIstMinutes();
   const start = minutesOf(strategyObj.start_time || '09:45');
   const squareOff = minutesOf(strategyObj.square_off || '15:15');

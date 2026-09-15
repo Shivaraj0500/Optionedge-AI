@@ -6,10 +6,7 @@ hosted_login = true
 [ai]
 required = true
 
-[[config]]
-name = "ai_provider"
-type = "string"
-default = "google"
+# Gemini provider is selected in the Hatchable AI provider settings.
 
 [[secret]]
 name = "UPSTOX_CLIENT_ID"

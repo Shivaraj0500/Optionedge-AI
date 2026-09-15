@@ -43,7 +43,7 @@ export default async function(req, res) {
     };
 
     const prompt = `Analyze the following OptionEdge AI state as a conservative institutional risk/research copilot. Return ONLY valid JSON with exactly these keys: regime (string), thesis (string), risks (array of concise strings), safeguards (array of concise strings), confidence (string: HIGH/MEDIUM/LOW/INSUFFICIENT_DATA), next_step (string). Do not predict prices, promise returns, invent missing data, or place/authorize orders. Distinguish verified data from missing data. If live market context is absent, say so. The deterministic strategy and Risk Engine are authoritative; AI may explain or flag, but must never override them. A running paper campaign is simulation only.\n\nSTATE:\n${JSON.stringify(context)}`;
-    const r = await ai.generateText({ model: 'sonnet', prompt, system: 'You are a risk-aware quantitative options research copilot. Valid JSON only. Never invent facts.', purpose: 'options-risk-copilot', userId });
+    const r = await ai.generateText({ model: 'gemini', prompt, system: 'You are a risk-aware quantitative options research copilot. Valid JSON only. Never invent facts.', purpose: 'options-risk-copilot', userId });
     let text = (r.text || r.output || '').replace(/^```json\s*/, '').replace(/```$/, '').trim();
     const analysis = JSON.parse(text);
     const required = ['regime','thesis','risks','safeguards','confidence','next_step'];

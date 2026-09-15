@@ -1,0 +1,1 @@
+ALTER TABLE paper_campaigns ADD COLUMN IF NOT EXISTS recovery_required boolean NOT NULL DEFAULT false

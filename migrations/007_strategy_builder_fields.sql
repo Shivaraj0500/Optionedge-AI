@@ -1,0 +1,1 @@
+ALTER TABLE strategy_configs ADD COLUMN IF NOT EXISTS candle_type text NOT NULL DEFAULT 'OHLC'

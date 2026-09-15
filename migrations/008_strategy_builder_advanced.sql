@@ -1,0 +1,9 @@
+ALTER TABLE strategy_configs ADD COLUMN IF NOT EXISTS start_time text NOT NULL DEFAULT '09:45';
+ALTER TABLE strategy_configs ADD COLUMN IF NOT EXISTS adx_period integer NOT NULL DEFAULT 14;
+ALTER TABLE strategy_configs ADD COLUMN IF NOT EXISTS atr_period integer NOT NULL DEFAULT 14;
+ALTER TABLE strategy_configs ADD COLUMN IF NOT EXISTS confirmation_candles integer NOT NULL DEFAULT 1;
+ALTER TABLE strategy_configs ADD COLUMN IF NOT EXISTS roll_mode text NOT NULL DEFAULT 'CLOSED_CANDLE_OUTSIDE_CORRIDOR';
+ALTER TABLE strategy_configs ADD COLUMN IF NOT EXISTS regime_rule jsonb NOT NULL DEFAULT '{"mode":"ADX_RANGE","adx_less_than":22,"adx_below_plus_di":true,"adx_below_minus_di":true}'::jsonb;
+ALTER TABLE strategy_configs ADD COLUMN IF NOT EXISTS leg_config jsonb NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE strategy_configs ADD COLUMN IF NOT EXISTS margin_config jsonb NOT NULL DEFAULT '{"show_estimate":true,"broker_margin_live":false}'::jsonb;
+ALTER TABLE strategy_configs ADD COLUMN IF NOT EXISTS version integer NOT NULL DEFAULT 1;

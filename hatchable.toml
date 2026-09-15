@@ -14,6 +14,26 @@ expose = true
 name = "UPSTOX_CLIENT_SECRET"
 expose = true
 
-[[secret]]
-name = "ANTHROPIC_API_KEY"
-expose = true
+[db.tables.strategy_configs]
+read = "own"
+write = "own"
+
+[db.tables.strategy_versions]
+read = "own"
+write = "own"
+
+[db.tables.strategy_runs]
+read = "own"
+write = "own"
+
+[db.tables.paper_positions]
+read = "own"
+write = "own"
+
+[db.tables.broker_connections]
+read = "own"
+write = "own"
+
+[db.tables.audit_events]
+read = "own"
+write = "own"

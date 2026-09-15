@@ -30,7 +30,7 @@ export default async function(req, res) {
     const riskQ = await db.query('SELECT * FROM risk_configs WHERE user_id=$1 LIMIT 1', [userId]);
     const risk = riskQ.rows[0] || null;
     const bt = await db.query('SELECT * FROM backtest_runs WHERE user_id=$1 ORDER BY created_at DESC LIMIT 5', [userId]);
-    const decisionQ = campaign ? await db.query('SELECT * FROM paper_decisions WHERE user_id=$1 AND campaign_id=$2 ORDER BY created_at DESC LIMIT 1', [userId, campaign.id]) : { rows: [] };
+    const decisionQ = campaign ? await db.query('SELECT * FROM paper_decisions WHERE user_id=$1 AND campaign_id=$2 ORDER BY cycle_at DESC LIMIT 1', [userId, campaign.id]) : { rows: [] };
     const decision = decisionQ.rows[0] || null;
     const context = {
       strategy: strategy ? { ...strategy, secret: undefined } : null,

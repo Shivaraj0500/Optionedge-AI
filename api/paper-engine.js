@@ -322,9 +322,14 @@ async function state(userId, campaignId) {
 async function cycle(req, res, campaign) {
   const userId = req.user.id;
   const s = await db.query('SELECT * FROM strategy_configs WHERE id=$1 AND user_id=$2 LIMIT 1', [campaign.strategy_id, userId]);
-  const strategy = s.rows[0];
-  if (!strategy) return res.status(404).json({ error: 'STRATEGY_NOT_FOUND' });
-  const strategyObj = { ...strategy, version: Number(strategy.version || 1), adx_threshold: Number(strategy.adx_threshold), atr_multiplier: Number(strategy.atr_multiplier), regime_rule: strategy.regime_rule || {}, leg_config: strategy.leg_config || [] };
+  const strategyBase = s.rows[0];
+  if (!strategyBase) return res.status(404).json({ error: 'STRATEGY_NOT_FOUND' });
+  const versionQ = await db.query('SELECT version_number, config FROM strategy_versions WHERE strategy_id=$1 AND user_id=$2 AND version_number=$3 LIMIT 1', [campaign.strategy_id, userId, Number(campaign.strategy_version || strategyBase.version || 1)]);
+  const pinned = versionQ.rows[0];
+  if (!pinned) return res.status(409).json({ error: 'STRATEGY_VERSION_NOT_FOUND', version: Number(campaign.strategy_version || strategyBase.version || 1) });
+  const versionConfig = pinned.config && typeof pinned.config === 'object' ? pinned.config : {};
+  const strategy = { ...strategyBase, ...versionConfig, id: strategyBase.id, version: Number(pinned.version_number), leg_config: versionConfig.legs || strategyBase.leg_config || [] };
+  const strategyObj = { ...strategy, adx_threshold: Number(strategy.adx_threshold), atr_multiplier: Number(strategy.atr_multiplier), regime_rule: strategy.regime_rule || {}, leg_config: strategy.leg_config || [] };
   const connection = await broker(req);
   const ctx = await marketContext(connection, strategyObj);
   const chain = await optionChain(connection, strategyObj);
@@ -443,7 +448,11 @@ export default async function(req, res) {
     const connection = await broker(req);
     const strategyQ = await db.query('SELECT * FROM strategy_configs WHERE id=$1 AND user_id=$2 LIMIT 1', [campaign.strategy_id, userId]);
     if (!strategyQ.rows[0]) return res.status(404).json({ error: 'STRATEGY_NOT_FOUND' });
-    const chain = await optionChain(connection, strategyQ.rows[0]);
+    const versionQ = await db.query('SELECT version_number, config FROM strategy_versions WHERE strategy_id=$1 AND user_id=$2 AND version_number=$3 LIMIT 1', [campaign.strategy_id, userId, Number(campaign.strategy_version || strategyQ.rows[0].version || 1)]);
+    if (!versionQ.rows[0]) return res.status(409).json({ error: 'STRATEGY_VERSION_NOT_FOUND' });
+    const pinned = versionQ.rows[0].config && typeof versionQ.rows[0].config === 'object' ? versionQ.rows[0].config : {};
+    const stopStrategy = { ...strategyQ.rows[0], ...pinned, option_expiry: pinned.option_expiry || strategyQ.rows[0].option_expiry };
+    const chain = await optionChain(connection, stopStrategy);
     const result = await closeOpenLegs(userId, campaign, chain, 'USER_STOP');
     await db.query('UPDATE paper_campaigns SET status=$1, closed_at=now(), realized_pnl=COALESCE(realized_pnl,0)+$2, updated_at=now(), last_status=$3, last_reason=$4 WHERE id=$5 AND user_id=$6', ['STOPPED', result.realized, 'STOPPED', 'USER_STOP', campaign.id, userId]);
     return res.json({ ...(await state(userId, campaign.id)), cycle: { action: 'STOP', reason: 'USER_STOP', closed: result.closed, broker_orders_sent: false } });

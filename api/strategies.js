@@ -9,6 +9,7 @@ const ALLOWED_CANDLES = ['OHLC', 'HEIKIN_ASHI'];
 const ALLOWED_SIDES = ['BUY', 'SELL'];
 const ALLOWED_TYPES = ['CE', 'PE'];
 const ALLOWED_SELECTION = ['ATM', 'STRIKE_OFFSET', 'PREMIUM', 'DELTA', 'CUSTOM_STRIKE'];
+const ALLOWED_EXPIRIES = ['current_week', 'next_week', 'far_week', 'current_month', 'next_month', 'far_month'];
 
 function clampInt(v, min, max, fallback) {
   const n = Number.parseInt(v, 10);
@@ -56,6 +57,7 @@ function normalizeConfig(body) {
   const timeframe = ALLOWED_TIMEFRAMES.includes(body.timeframe) ? body.timeframe : '15m';
   const candleType = ALLOWED_CANDLES.includes(body.candle_type) ? body.candle_type : 'OHLC';
   const underlying = ALLOWED_UNDERLYINGS.includes(body.underlying) ? body.underlying : 'NIFTY 50';
+  const optionExpiry = ALLOWED_EXPIRIES.includes(body.option_expiry) ? body.option_expiry : 'current_week';
   const squareOff = /^([01]\d|2[0-3]):[0-5]\d$/.test(String(body.square_off || '')) ? String(body.square_off) : '15:15';
   const startTime = /^([01]\d|2[0-3]):[0-5]\d$/.test(String(body.start_time || '')) ? String(body.start_time) : '09:45';
   const legs = Array.isArray(body.legs) ? body.legs.map(cleanLeg).filter(l => l.enabled) : [];
@@ -66,6 +68,7 @@ function normalizeConfig(body) {
   return {
     name: String(body.name || 'Untitled Strategy').trim().slice(0, 120),
     underlying,
+    option_expiry: optionExpiry,
     timeframe,
     candle_type: candleType,
     start_time: startTime,
@@ -97,6 +100,7 @@ function asStrategy(row) {
     id: row.id,
     name: row.name,
     underlying: row.underlying,
+    option_expiry: row.option_expiry || 'current_week',
     timeframe: row.timeframe,
     candle_type: row.candle_type,
     start_time: row.start_time,
@@ -141,12 +145,12 @@ export default async function (req, res) {
     const config = normalizeConfig(req.body || {});
     const inserted = await db.query(
       `INSERT INTO strategy_configs
-        (user_id, name, underlying, timeframe, candle_type, start_time, square_off, overnight_exposure,
+        (user_id, name, underlying, option_expiry, timeframe, candle_type, start_time, square_off, overnight_exposure,
          adx_period, adx_threshold, atr_period, atr_multiplier, confirmation_candles, regime_rule,
          roll_mode, leg_config, margin_config, version, enabled)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,1,false)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,1,false)
        RETURNING *`,
-      [user.id, config.name, config.underlying, config.timeframe, config.candle_type, config.start_time,
+      [user.id, config.name, config.underlying, config.option_expiry, config.timeframe, config.candle_type, config.start_time,
        config.square_off, config.overnight_exposure, config.adx_period, config.adx_threshold,
        config.atr_period, config.atr_multiplier, config.confirmation_candles, JSON.stringify(config.regime_rule),
        config.roll_mode, JSON.stringify(config.legs), JSON.stringify(config.margin_config)]
@@ -176,13 +180,13 @@ export default async function (req, res) {
     const nextVersion = Number(current.version || 1) + 1;
     const updated = await db.query(
       `UPDATE strategy_configs
-       SET name=$1, underlying=$2, timeframe=$3, candle_type=$4, start_time=$5, square_off=$6,
-           overnight_exposure=$7, adx_period=$8, adx_threshold=$9, atr_period=$10, atr_multiplier=$11,
-           confirmation_candles=$12, regime_rule=$13, roll_mode=$14, leg_config=$15, margin_config=$16,
-           version=$17, updated_at=now()
-       WHERE id=$18 AND user_id=$19
+       SET name=$1, underlying=$2, option_expiry=$3, timeframe=$4, candle_type=$5, start_time=$6, square_off=$7,
+           overnight_exposure=$8, adx_period=$9, adx_threshold=$10, atr_period=$11, atr_multiplier=$12,
+           confirmation_candles=$13, regime_rule=$14, roll_mode=$15, leg_config=$16, margin_config=$17,
+           version=$18, updated_at=now()
+       WHERE id=$19 AND user_id=$20
        RETURNING *`,
-      [config.name, config.underlying, config.timeframe, config.candle_type, config.start_time, config.square_off,
+      [config.name, config.underlying, config.option_expiry, config.timeframe, config.candle_type, config.start_time, config.square_off,
        config.overnight_exposure, config.adx_period, config.adx_threshold, config.atr_period, config.atr_multiplier,
        config.confirmation_candles, JSON.stringify(config.regime_rule), config.roll_mode, JSON.stringify(config.legs),
        JSON.stringify(config.margin_config), nextVersion, strategyId, user.id]

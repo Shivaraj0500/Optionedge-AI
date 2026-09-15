@@ -1,0 +1,1 @@
+ALTER TABLE strategy_configs ADD COLUMN IF NOT EXISTS option_expiry TEXT NOT NULL DEFAULT 'current_week';

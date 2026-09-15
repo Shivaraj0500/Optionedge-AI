@@ -434,27 +434,46 @@ async function cycle(req, res, campaign) {
   const versionConfig = pinned.config && typeof pinned.config === 'object' ? pinned.config : {};
   const strategy = { ...strategyBase, ...versionConfig, id: strategyBase.id, version: Number(pinned.version_number), leg_config: versionConfig.legs || strategyBase.leg_config || [] };
   const strategyObj = { ...strategy, adx_threshold: Number(strategy.adx_threshold), atr_multiplier: Number(strategy.atr_multiplier), regime_rule: strategy.regime_rule || {}, leg_config: strategy.leg_config || [] };
+  // Determine the trading-window state before fetching fresh broker data. This
+  // lets a persistent paper campaign safely WAIT overnight/pre-start without
+  // treating yesterday's candle as an error. Active positions still require
+  // fresh market data before square-off/management.
+  const currentMinutes = nowIstMinutes();
+  const start = minutesOf(strategyObj.start_time || '09:45');
+  const squareOff = minutesOf(strategyObj.square_off || '15:15');
+  const openQ = await db.query('SELECT * FROM paper_campaign_legs WHERE user_id=$1 AND campaign_id=$2 AND status=$3 ORDER BY execution_rank', [userId, campaign.id, 'OPEN']);
+
+  if (currentMinutes < start && !openQ.rows.length) {
+    await db.query("UPDATE paper_campaigns SET last_status='WAITING', last_reason='OUTSIDE_TRADING_WINDOW', updated_at=now(), cycle_lock_until=null, recovery_required=false WHERE id=$1 AND user_id=$2", [campaign.id, userId]);
+    return res.json({ ...(await state(userId, campaign.id)), cycle: { action: 'NONE', reason: 'OUTSIDE_TRADING_WINDOW', trading_window: { start_time: strategyObj.start_time || '09:45', square_off: strategyObj.square_off || '15:15' } }, broker_orders_sent: false });
+  }
+  if (currentMinutes >= squareOff && !openQ.rows.length) {
+    await db.query("UPDATE paper_campaigns SET status='RUNNING', closed_at=null, last_status='WAITING', last_reason='OUTSIDE_TRADING_WINDOW', updated_at=now(), cycle_lock_until=null, recovery_required=false WHERE id=$1 AND user_id=$2", [campaign.id, userId]);
+    return res.json({ ...(await state(userId, campaign.id)), cycle: { action: 'NONE', reason: 'OUTSIDE_TRADING_WINDOW', trading_window: { start_time: strategyObj.start_time || '09:45', square_off: strategyObj.square_off || '15:15' }, persistent_session: true }, broker_orders_sent: false });
+  }
+
   const connection = await broker(req);
   const ctx = await marketContext(connection, strategyObj, req);
   const chain = await optionChain(connection, strategyObj, req.user.id);
   if (!Number.isFinite(ctx.spot) || !ctx.lastCandle?.timestamp || !Number.isFinite(chain.spot)) {
     throw new Error('MARKET_CONTEXT_INVALID');
   }
-  const currentMinutes = nowIstMinutes();
-  const start = minutesOf(strategyObj.start_time || '09:45');
-  const squareOff = minutesOf(strategyObj.square_off || '15:15');
-  const openQ = await db.query('SELECT * FROM paper_campaign_legs WHERE user_id=$1 AND campaign_id=$2 AND status=$3 ORDER BY execution_rank', [userId, campaign.id, 'OPEN']);
 
   if (currentMinutes >= squareOff) {
     if (openQ.rows.length) {
       const result = await closeOpenLegs(userId, campaign, chain, 'SQUARE_OFF');
-      await db.query('UPDATE paper_campaigns SET status=$1, closed_at=now(), realized_pnl=COALESCE(realized_pnl,0)+$2, entry_spot=null, corridor_upper=null, corridor_lower=null, active_expiry=null, updated_at=now() WHERE id=$3 AND user_id=$4', ['CLOSED', result.realized, campaign.id, userId]);
-      await recordDecision(userId, campaign, strategyObj, ctx, 'SQUARE_OFF', 'SQUARE_OFF_TIME_REACHED', 'N/A', { action: 'CLOSE' }, { closed_legs: result.closed, realized_pnl: result.realized });
-      return res.json({ ...(await state(userId, campaign.id)), cycle: { action: 'CLOSE', reason: 'SQUARE_OFF_TIME_REACHED', closed: result.closed } });
+      // Square-off closes today's simulated exposure, while the campaign remains
+      // RUNNING so the same strategy can resume on the next trading day.
+      await db.query("UPDATE paper_campaigns SET status='RUNNING', closed_at=null, realized_pnl=COALESCE(realized_pnl,0)+$1, entry_spot=null, corridor_upper=null, corridor_lower=null, active_expiry=null, last_status='WAITING', last_reason='SQUARE_OFF_TIME_REACHED', updated_at=now(), recovery_required=false WHERE id=$2 AND user_id=$3", [result.realized, campaign.id, userId]);
+      await recordDecision(userId, campaign, strategyObj, ctx, 'SQUARE_OFF', 'SQUARE_OFF_TIME_REACHED', 'N/A', { action: 'CLOSE' }, { closed_legs: result.closed, realized_pnl: result.realized, persistent_session: true });
+      return res.json({ ...(await state(userId, campaign.id)), cycle: { action: 'CLOSE', reason: 'SQUARE_OFF_TIME_REACHED', closed: result.closed, persistent_session: true } });
     }
-    await db.query('UPDATE paper_campaigns SET status=$1, closed_at=COALESCE(closed_at,now()), updated_at=now() WHERE id=$2 AND user_id=$3', ['CLOSED', campaign.id, userId]);
-    await recordDecision(userId, campaign, strategyObj, ctx, 'CLOSED', 'SQUARE_OFF_TIME_REACHED_NO_POSITION', 'N/A', { action: 'NONE' }, {});
-    return res.json({ ...(await state(userId, campaign.id)), cycle: { action: 'NONE', reason: 'SQUARE_OFF_TIME_REACHED_NO_POSITION' } });
+    // Keep the campaign RUNNING across trading days. Square-off ends the day's
+    // exposure; it does not require the user to recreate the paper session the
+    // next morning. The next cycle before start/square-off will simply WAIT.
+    await db.query("UPDATE paper_campaigns SET status='RUNNING', closed_at=null, entry_spot=null, corridor_upper=null, corridor_lower=null, active_expiry=null, last_status='WAITING', last_reason='SQUARE_OFF_TIME_REACHED_NO_POSITION', updated_at=now(), recovery_required=false WHERE id=$1 AND user_id=$2", [campaign.id, userId]);
+    await recordDecision(userId, campaign, strategyObj, ctx, 'WAITING', 'SQUARE_OFF_TIME_REACHED_NO_POSITION', 'N/A', { action: 'NONE' }, { persistent_campaign: true });
+    return res.json({ ...(await state(userId, campaign.id)), cycle: { action: 'NONE', reason: 'SQUARE_OFF_TIME_REACHED_NO_POSITION', persistent_session: true } });
   }
 
   // Risk never prevents an emergency square-off. It only gates new entries/rolls.

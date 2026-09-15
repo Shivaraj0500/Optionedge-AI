@@ -27,7 +27,16 @@ export default async function(req, res) {
   const startedAt = campaign.started_at ? new Date(campaign.started_at).getTime() : null;
   const age = lastCycle ? Math.max(0, (Date.now() - lastCycle) / 1000) : null;
   const startedAge = startedAt ? Math.max(0, (Date.now() - startedAt) / 1000) : null;
-  const stale = campaign.status === 'RUNNING' && lastCycle && age > STALE_SECONDS;
+  const strategyQ = await db.query('SELECT start_time, square_off FROM strategy_configs WHERE id=$1 AND user_id=$2 LIMIT 1', [campaign.strategy_id, userId]);
+  const strategy = strategyQ.rows[0] || {};
+  const nowMinutes = nowIstMinutes();
+  const startMinutes = minutesOf(strategy.start_time || '09:45');
+  const squareOffMinutes = minutesOf(strategy.square_off || '15:15');
+  const withinTradingWindow = nowMinutes >= startMinutes && nowMinutes < squareOffMinutes;
+  // A persistent campaign is intentionally idle outside its trading window.
+  // Do not classify that idle period as stale/recovery-required when there are
+  // no open legs. Open exposure remains subject to normal recovery checks.
+  const stale = campaign.status === 'RUNNING' && lastCycle && age > STALE_SECONDS && (withinTradingWindow || (counts.OPEN || 0) > 0);
   const errored = campaign.status === 'RUNNING' && (String(campaign.last_status || '').toUpperCase().includes('ERROR') || String(campaign.last_status || '').toUpperCase() === 'EMERGENCY_CLOSE_FAILED');
   const lockActive = campaign.cycle_lock_until && new Date(campaign.cycle_lock_until).getTime() > Date.now();
   const reasons = [];
@@ -65,7 +74,7 @@ export default async function(req, res) {
   // A newly-created RUNNING campaign legitimately has no cycle timestamp until
   // its first engine evaluation. Only treat it as recovery-required if it has
   // remained cycle-less beyond the recovery grace period.
-  const runningWithoutCycle = campaign.status === 'RUNNING' && !lastCycle && (!startedAt || startedAge > STALE_SECONDS);
+  const runningWithoutCycle = campaign.status === 'RUNNING' && !lastCycle && (!startedAt || startedAge > STALE_SECONDS) && (withinTradingWindow || (counts.OPEN || 0) > 0);
   if (orphanOpenLegs) reasons.push('OPEN_LEGS_ON_NON_RUNNING_CAMPAIGN');
   if (runningWithoutCycle) reasons.push('RUNNING_CAMPAIGN_WITHOUT_CYCLE_TIMESTAMP');
 

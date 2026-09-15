@@ -14,6 +14,8 @@ export default async function(req, res) {
   const user = await auth.getUser(req);
   const code = req.query?.code;
   const state = req.query?.state;
+  const error = req.query?.error;
+  if (error) return res.redirect('/?broker=error');
   if (!user) return res.status(401).send('Your OptionEdge AI session was not available for the broker callback. Please sign in and start Connect Upstox again.');
   if (!code || !state) return res.status(400).send('Missing Upstox authorization code.');
 

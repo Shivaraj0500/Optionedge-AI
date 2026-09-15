@@ -15,7 +15,7 @@ export default async function(req, res) {
 
   const client = process.env.UPSTOX_CLIENT_ID;
   const secret = process.env.UPSTOX_CLIENT_SECRET;
-  if (!client || !secret) return res.status(503).send('Upstox credentials are not configured yet. Open the Hatchable Setup page and add them.');
+  if (!client || !secret) return res.status(503).send('Upstox credentials are not configured. Add UPSTOX_CLIENT_ID and UPSTOX_CLIENT_SECRET in Hatchable Setup.');
 
   const redirect = 'https://optionedge-ai-hrdh.hatchable.site/api/upstox-callback';
   const payload = JSON.stringify({ u: user.id, t: Date.now(), n: crypto.randomUUID() });

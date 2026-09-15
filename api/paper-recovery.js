@@ -14,7 +14,9 @@ export default async function(req, res) {
   const lq = await db.query("SELECT status, COUNT(*)::int AS count FROM paper_campaign_legs WHERE user_id=$1 AND campaign_id=$2 GROUP BY status", [userId, campaign.id]);
   const counts = Object.fromEntries(lq.rows.map(x => [x.status, Number(x.count)]));
   const lastCycle = campaign.last_cycle_at ? new Date(campaign.last_cycle_at).getTime() : null;
+  const startedAt = campaign.started_at ? new Date(campaign.started_at).getTime() : null;
   const age = lastCycle ? Math.max(0, (Date.now() - lastCycle) / 1000) : null;
+  const startedAge = startedAt ? Math.max(0, (Date.now() - startedAt) / 1000) : null;
   const stale = campaign.status === 'RUNNING' && lastCycle && age > STALE_SECONDS;
   const errored = campaign.status === 'RUNNING' && (String(campaign.last_status || '').toUpperCase().includes('ERROR') || String(campaign.last_status || '').toUpperCase() === 'EMERGENCY_CLOSE_FAILED');
   const lockActive = campaign.cycle_lock_until && new Date(campaign.cycle_lock_until).getTime() > Date.now();
@@ -24,7 +26,10 @@ export default async function(req, res) {
   if (campaign.recovery_required) reasons.push('RECOVERY_FLAGGED');
 
   const orphanOpenLegs = (campaign.status !== 'RUNNING') && (counts.OPEN || 0) > 0;
-  const runningWithoutCycle = campaign.status === 'RUNNING' && !campaign.last_cycle_at;
+  // A newly-created RUNNING campaign legitimately has no cycle timestamp until
+  // its first engine evaluation. Only treat it as recovery-required if it has
+  // remained cycle-less beyond the recovery grace period.
+  const runningWithoutCycle = campaign.status === 'RUNNING' && !lastCycle && (!startedAt || startedAge > STALE_SECONDS);
   if (orphanOpenLegs) reasons.push('OPEN_LEGS_ON_NON_RUNNING_CAMPAIGN');
   if (runningWithoutCycle) reasons.push('RUNNING_CAMPAIGN_WITHOUT_CYCLE_TIMESTAMP');
 
@@ -57,7 +62,7 @@ export default async function(req, res) {
       last_cycle_at: campaign.last_cycle_at,
       cycle_lock_until: campaign.cycle_lock_until
     },
-    timing: { stale_after_seconds: STALE_SECONDS, last_cycle_age_seconds: age === null ? null : Math.round(age), cycle_lock_active: Boolean(lockActive) },
+    timing: { stale_after_seconds: STALE_SECONDS, last_cycle_age_seconds: age === null ? null : Math.round(age), started_age_seconds: startedAge === null ? null : Math.round(startedAge), cycle_lock_active: Boolean(lockActive) },
     legs: { open: counts.OPEN || 0, closed: counts.CLOSED || 0, total: Object.values(counts).reduce((a,b)=>a+b,0) },
     reasons,
     action: required ? 'Do not resume automated cycles until campaign state, market data, and open legs are reconciled.' : 'No recovery condition detected.'

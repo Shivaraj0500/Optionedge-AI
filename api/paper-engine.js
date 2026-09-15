@@ -423,6 +423,8 @@ async function state(userId, campaignId) {
   };
 }
 
+// Scheduled execution uses a dedicated shared core; no scheduler bridge is exposed from this user route.
+
 async function cycle(req, res, campaign) {
   const userId = req.user.id;
   const s = await db.query('SELECT * FROM strategy_configs WHERE id=$1 AND user_id=$2 LIMIT 1', [campaign.strategy_id, userId]);

@@ -40,7 +40,10 @@ export default async function(req, res) {
       backtests: bt.rows.map(r => ({ id:r.id, created_at:r.created_at, strategy_id:r.strategy_id, strategy_version:r.strategy_version, status:r.status, metrics:r.metrics }))
     };
     const prompt = `Analyze the following OptionEdge AI state as a conservative institutional risk/research copilot. Return ONLY valid JSON with exactly these keys: regime (string), thesis (string), risks (array of concise strings), safeguards (array of concise strings), confidence (string: HIGH/MEDIUM/LOW/INSUFFICIENT_DATA), next_step (string). Do not predict prices, promise returns, invent missing data, or place/authorize orders. Distinguish verified data from missing data. If live market context is absent, say so. The deterministic strategy and Risk Engine are authoritative; AI may explain or flag, but must never override them. A running paper campaign is simulation only.\n\nSTATE:\n${JSON.stringify(context)}`;
-    const r = await generateWithRetry({ model: 'gemini', prompt, system: 'You are a risk-aware quantitative options research copilot. Valid JSON only. Never invent facts.', purpose: 'options-risk-copilot', userId });
+    // Use Hatchable's configured BYOK provider rather than hard-coding a model
+    // family. This keeps the copilot aligned with the provider key configured
+    // by the project owner (OpenAI in this deployment).
+    const r = await generateWithRetry({ prompt, system: 'You are a risk-aware quantitative options research copilot. Valid JSON only. Never invent facts.', purpose: 'options-risk-copilot', userId });
     if (r.finishReason === 'length' || r.finishReason === 'max_tokens') throw new Error('AI_RESPONSE_TRUNCATED');
     let text = (r.text || r.output || '').replace(/^```json\s*/, '').replace(/```$/, '').trim();
     const analysis = JSON.parse(text);

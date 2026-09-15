@@ -645,6 +645,17 @@ export default async function(req, res) {
     return await cycle(req, res, campaign);
   } catch (error) {
     const message = String(error?.message || 'PAPER_ENGINE_ERROR');
+    // If the cycle already reached a terminal state and all simulated legs are
+    // closed, the position is reconciled. Do not turn a post-square-off
+    // response/telemetry failure into a permanent recovery block.
+    const currentQ = await db.query('SELECT status, last_reason FROM paper_campaigns WHERE id=$1 AND user_id=$2 LIMIT 1', [campaign.id, userId]);
+    const current = currentQ.rows[0];
+    const openQ = await db.query("SELECT COUNT(*)::int AS count FROM paper_campaign_legs WHERE campaign_id=$1 AND user_id=$2 AND status='OPEN'", [campaign.id, userId]);
+    const terminalClean = current && ['CLOSED', 'STOPPED'].includes(String(current.status || '').toUpperCase()) && Number(openQ.rows[0]?.count || 0) === 0;
+    if (terminalClean) {
+      await db.query('UPDATE paper_campaigns SET last_cycle_at=COALESCE(last_cycle_at,now()), last_status=$1, last_reason=COALESCE(last_reason,$2), updated_at=now(), cycle_lock_until=null, recovery_required=false WHERE id=$3 AND user_id=$4', [current.status, current.last_reason || message, campaign.id, userId]);
+      return res.status(200).json({ ...(await state(userId, campaign.id)), cycle: { action: 'NO_ACTION', reason: current.last_reason || 'TERMINAL_STATE_RECONCILED' }, broker_orders_sent: false, terminal_reconciled: true });
+    }
     await db.query('UPDATE paper_campaigns SET last_cycle_at=now(), last_status=$1, last_reason=$2, updated_at=now(), recovery_required=true WHERE id=$3 AND user_id=$4', ['ERROR', message, campaign.id, userId]);
     return res.status(502).json({ ...(await state(userId, campaign.id)), error: message, broker_orders_sent: false });
   } finally {

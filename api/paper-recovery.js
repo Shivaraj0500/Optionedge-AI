@@ -28,6 +28,19 @@ export default async function(req, res) {
   if (orphanOpenLegs) reasons.push('OPEN_LEGS_ON_NON_RUNNING_CAMPAIGN');
   if (runningWithoutCycle) reasons.push('RUNNING_CAMPAIGN_WITHOUT_CYCLE_TIMESTAMP');
 
+  // A terminal campaign with zero open legs is fully reconciled. A stale
+  // recovery flag can remain after a successful square-off if a later
+  // response/telemetry operation failed; do not keep a clean terminal
+  // campaign permanently blocked in that case.
+  const terminalClean = ['CLOSED', 'STOPPED'].includes(String(campaign.status || '').toUpperCase()) && (counts.OPEN || 0) === 0;
+  if (terminalClean && campaign.recovery_required && !orphanOpenLegs) {
+    await db.query('UPDATE paper_campaigns SET recovery_required=false, cycle_lock_until=null, updated_at=now() WHERE id=$1 AND user_id=$2', [campaign.id, userId]);
+    campaign.recovery_required = false;
+    campaign.cycle_lock_until = null;
+    const flagIndex = reasons.indexOf('RECOVERY_FLAGGED');
+    if (flagIndex >= 0) reasons.splice(flagIndex, 1);
+  }
+
   const required = reasons.length > 0;
   if (required !== Boolean(campaign.recovery_required)) {
     await db.query('UPDATE paper_campaigns SET recovery_required=$1, updated_at=now() WHERE id=$2 AND user_id=$3', [required, campaign.id, userId]);

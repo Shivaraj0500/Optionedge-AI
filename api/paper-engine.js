@@ -285,8 +285,9 @@ function closeRank(leg) {
   return role * 2 + type + 1;
 }
 
-async function closeOpenLegs(userId, campaign, chain, reason) {
-  const q = await db.query('SELECT * FROM paper_campaign_legs WHERE user_id = $1 AND campaign_id = $2 AND status = $3 ORDER BY execution_rank', [userId, campaign.id, 'OPEN']);
+async function closeOpenLegs(userId, campaign, chain, reason, scope = 'ALL') {
+  const scopeClause = scope === 'SELL_ONLY' ? " AND side = 'SELL'" : '';
+  const q = await db.query(`SELECT * FROM paper_campaign_legs WHERE user_id = $1 AND campaign_id = $2 AND status = $3${scopeClause} ORDER BY execution_rank`, [userId, campaign.id, 'OPEN']);
   const ordered = [...q.rows].sort((a, b) => closeRank(a) - closeRank(b) || Number(a.execution_rank) - Number(b.execution_rank));
   let realized = 0;
   const closed = [];
@@ -380,7 +381,7 @@ async function cycle(req, res, campaign) {
     const lower = num(campaign.corridor_lower);
     const breach = Number.isFinite(entrySpot) && Number.isFinite(upper) && Number.isFinite(lower) && (ctx.lastCandle.close > upper || ctx.lastCandle.close < lower);
     if (breach && strategyObj.roll_mode === 'CLOSED_CANDLE_OUTSIDE_CORRIDOR') {
-      const result = await closeOpenLegs(userId, campaign, chain, 'CORRIDOR_BREACH_ROLL');
+      const result = await closeOpenLegs(userId, campaign, chain, 'CORRIDOR_BREACH_ROLL', 'SELL_ONLY');
       await db.query('UPDATE paper_campaigns SET realized_pnl=COALESCE(realized_pnl,0)+$1, entry_spot=null, corridor_upper=null, corridor_lower=null, active_expiry=null, updated_at=now() WHERE id=$2 AND user_id=$3', [result.realized, campaign.id, userId]);
       await recordDecision(userId, campaign, strategyObj, ctx, 'ROLL', 'CLOSED_CANDLE_OUTSIDE_CORRIDOR', 'ACTIVE_POSITION', { action: 'ROLL' }, { closed_legs: result.closed, mtm_before_roll: marks.mtm, realized_on_roll: result.realized });
       return await openNewStructure(req, res, campaign, strategyObj, connection, ctx, chain, 'ROLL_REENTRY');
@@ -409,8 +410,13 @@ async function cycle(req, res, campaign) {
 
 async function openNewStructure(req, res, campaign, strategy, connection, ctx, chain, trigger) {
   const userId = req.user.id;
-  const configured = Array.isArray(strategy.leg_config) ? strategy.leg_config.filter(x => x.enabled !== false) : [];
-  if (!configured.length) return res.status(422).json({ error: 'NO_ENABLED_STRATEGY_LEGS' });
+  // On a corridor roll, retain existing BUY hedge legs and replace only SELL legs.
+  // A fresh ENTRY_SIGNAL resolves and opens the complete configured structure.
+  const rolling = trigger === 'ROLL_REENTRY';
+  const configured = Array.isArray(strategy.leg_config)
+    ? strategy.leg_config.filter(x => x.enabled !== false && (!rolling || String(x.side).toUpperCase() === 'SELL'))
+    : [];
+  if (!configured.length) return res.status(422).json({ error: rolling ? 'NO_ENABLED_SELL_LEGS_FOR_ROLL' : 'NO_ENABLED_STRATEGY_LEGS' });
   const selected = [];
   for (const leg of configured) {
     const result = selectLeg(chain, strategy, leg);
@@ -436,8 +442,9 @@ async function openNewStructure(req, res, campaign, strategy, connection, ctx, c
 
   const cycleId = crypto.randomUUID();
   const inserted = [];
-  // All contracts are resolved and validated before any simulated fill is recorded.
-  // Protective buys always precede shorts: BUY CE -> BUY PE -> SELL CE -> SELL PE.
+  // All contracts are resolved before any simulated fill is recorded.
+  // Initial entry order: BUY CE -> BUY PE -> SELL CE -> SELL PE.
+  // Roll order: existing BUY hedges remain open; only newly resolved SELL legs are opened.
   for (const leg of selected) {
     const row = await db.query('INSERT INTO paper_campaign_legs (user_id,campaign_id,strategy_id,strategy_version,cycle_id,leg_id,role,side,option_type,execution_rank,expiry,strike,instrument_key,trading_symbol,lot_size,lots,quantity,entry_price,current_price,pnl,status,metadata) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$18,0,$19,$20) RETURNING *', [
       userId, campaign.id, strategy.id, Number(strategy.version || 1), cycleId, leg.leg_id, leg.role, leg.side, leg.option_type, leg.execution_rank, leg.expiry, leg.strike, leg.instrument_key, leg.trading_symbol, leg.lot_size, leg.lots, leg.quantity, leg.entry_price, 'OPEN', JSON.stringify({ trigger, simulated: true, fill_basis: leg.side === 'BUY' ? 'ASK_OR_LTP' : 'BID_OR_LTP' })

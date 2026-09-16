@@ -9,6 +9,16 @@
     stopped:false,
     onTick:null,
     onState:null,
+    subscriptions:new Set(['NSE_INDEX|Nifty 50','NSE_INDEX|Nifty Bank']),
+    subscribe(keys){
+      for(const key of (keys||[])) if(key) this.subscriptions.add(key);
+      if(this.socket && this.socket.readyState===WebSocket.OPEN) this.sendSubscription();
+    },
+    sendSubscription(){
+      if(!this.socket || this.socket.readyState!==WebSocket.OPEN) return;
+      const payload={guid:'optionedge-'+Date.now().toString(36),method:'sub',data:{mode:'ltpc',instrumentKeys:[...this.subscriptions]}};
+      this.socket.send(new TextEncoder().encode(JSON.stringify(payload)));
+    },
     async connect(onTick,onState){
       this.onTick=onTick||this.onTick;
       this.onState=onState||this.onState;
@@ -25,8 +35,7 @@
         ws.onopen=()=>{
           this.reconnectAttempt=0;
           if(this.onState) this.onState('LIVE');
-          const payload={guid:'optionedge-'+Date.now().toString(36),method:'sub',data:{mode:'ltpc',instrumentKeys:['NSE_INDEX|Nifty 50','NSE_INDEX|Nifty Bank']}};
-          ws.send(new TextEncoder().encode(JSON.stringify(payload)));
+          this.sendSubscription();
         };
         ws.onmessage=async(ev)=>{
           try{

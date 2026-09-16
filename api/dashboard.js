@@ -23,6 +23,24 @@ async function broker(userId) {
   return c;
 }
 
+async function liveLtp(connection, instrumentKeys) {
+  const keys = [...new Set((instrumentKeys || []).filter(Boolean))];
+  if (!keys.length) return {};
+  const headers = { Accept: 'application/json', Authorization: 'Bearer ' + connection.access_token };
+  const url = 'https://api.upstox.com/v3/market-quote/ltp?instrument_key=' + encodeURIComponent(keys.join(','));
+  const response = await fetch(url, { headers });
+  const data = await response.json().catch(() => ({}));
+  if (response.status === 401) throw new Error('UPSTOX_TOKEN_EXPIRED');
+  if (!response.ok || data.status !== 'success') throw new Error('UPSTOX_LTP_FAILED');
+  const out = {};
+  for (const [key, value] of Object.entries(data.data || {})) {
+    const instrumentKey = value?.instrument_token || key;
+    const price = n(value?.last_price);
+    if (instrumentKey && price != null) out[instrumentKey] = price;
+  }
+  return out;
+}
+
 async function liveIndex(connection, underlying, timeframe = '15m') {
   const instrumentKey = UNDERLYINGS[underlying];
   const minutes = timeframe === '3m' ? 3 : timeframe === '5m' ? 5 : timeframe === '30m' ? 30 : timeframe === '1h' ? 60 : 15;
@@ -71,12 +89,9 @@ async function liveIndex(connection, underlying, timeframe = '15m') {
   if(dx.length<period) throw new Error('INSUFFICIENT_CANDLES');
   let adx=dx.slice(0,period).reduce((a,b)=>a+b,0)/period;
   for(let i=period;i<dx.length;i++) adx=((adx*(period-1))+dx[i])/period;
-  const chainUrl='https://api.upstox.com/v2/option/chain?instrument_key='+encodeURIComponent(instrumentKey)+'&expiry_date=current_week';
-  const chainResponse=await fetch(chainUrl,{headers});
-  const chain=await chainResponse.json().catch(()=>({}));
-  if(chainResponse.status===401) throw new Error('UPSTOX_TOKEN_EXPIRED');
-  const liveSpot=chainResponse.ok&&chain.status==='success'&&Array.isArray(chain.data)&&chain.data.length?n(chain.data[0]?.underlying_spot_price):null;
-  return { underlying, timeframe, price:liveSpot ?? last.close, price_source:liveSpot!=null?'UPSTOX_OPTION_CHAIN_SPOT':'UPSTOX_COMPLETED_CANDLE_CLOSE', adx, plus_di:plusDi, minus_di:minusDi, atr, completed_candle:last.timestamp, source:'UPSTOX' };
+  const liveQuotes = await liveLtp(connection, [instrumentKey]);
+  const liveSpot = n(liveQuotes[instrumentKey]);
+  return { underlying, timeframe, price:liveSpot ?? last.close, price_source:liveSpot!=null?'UPSTOX_LTP_V3':'UPSTOX_COMPLETED_CANDLE_CLOSE', adx, plus_di:plusDi, minus_di:minusDi, atr, completed_candle:last.timestamp, source:'UPSTOX' };
 }
 
 export default async function(req,res){
@@ -89,7 +104,21 @@ export default async function(req,res){
       liveIndex(connection,'BANK NIFTY',tf).catch(e=>({underlying:'BANK NIFTY',error:fmtError(e),source:'UPSTOX'})),
       db.query(`SELECT l.id,l.campaign_id,l.strategy_id,l.strategy_version,l.role,l.side,l.option_type,l.execution_rank,l.expiry,l.strike,l.trading_symbol,l.quantity,l.entry_price,l.current_price,l.pnl,l.status,l.entry_at,l.last_mark_at,c.underlying,c.status AS campaign_status,c.started_at FROM paper_campaign_legs l JOIN paper_campaigns c ON c.id=l.campaign_id AND c.user_id=l.user_id WHERE l.user_id=$1 AND l.status='OPEN' AND c.status='RUNNING' ORDER BY c.started_at DESC,l.execution_rank ASC`,[userId])
     ]);
-    const trades=tradesQ.rows.map(t=>({...t,strike:n(t.strike),quantity:n(t.quantity,0),entry_price:n(t.entry_price),current_price:n(t.current_price),pnl:n(t.pnl,0)}));
+    const rawTrades = tradesQ.rows.map(t=>({...t,strike:n(t.strike),quantity:n(t.quantity,0),entry_price:n(t.entry_price),current_price:n(t.current_price),pnl:n(t.pnl,0)}));
+    const liveQuotes = await liveLtp(connection, rawTrades.map(t => t.instrument_key));
+    const trades = rawTrades.map(t => {
+      const livePrice = n(liveQuotes[t.instrument_key]);
+      const currentPrice = livePrice ?? t.current_price;
+      const pnl = Number.isFinite(livePrice) ? (t.side === 'BUY' ? 1 : -1) * (livePrice - Number(t.entry_price)) * Number(t.quantity) : Number(t.pnl || 0);
+      return { ...t, current_price: currentPrice, pnl, live_price: Number.isFinite(livePrice), mark_source: Number.isFinite(livePrice) ? 'UPSTOX_LTP_V3' : 'STORED_PAPER_MARK' };
+    });
+    const liveTrades = trades.filter(t => t.live_price);
+    if (liveTrades.length) {
+      await db.transaction(liveTrades.map(t => ({
+        sql: 'UPDATE paper_campaign_legs SET current_price=$1,pnl=$2,last_mark_at=now() WHERE id=$3 AND user_id=$4 AND status=$5',
+        params: [t.current_price, t.pnl, t.id, userId, 'OPEN']
+      })));
+    }
     const runningPnl=trades.reduce((s,t)=>s+Number(t.pnl||0),0);
     const campaigns=[...new Set(trades.map(t=>t.campaign_id))];
     return res.json({source:'OptionEdge AI Dashboard',as_of:new Date().toISOString(),timeframe:tf,indices:{nifty,nifty_bank:banknifty},running:{campaigns:campaigns.length,legs:trades.length,pnl:runningPnl,trades}});

@@ -1,7 +1,10 @@
-// OptionEdge AI — browser-side Upstox V3 LTPC stream.
-// The server only returns Upstox's short-lived authorized websocket URI; the broker access token stays server-side.
+// OptionEdge AI — Upstox V3 browser market stream.
+// Broker access tokens stay server-side. The browser receives only Upstox's one-use websocket URI.
 (function(){
   const API=(window.__HATCHABLE__&&window.__HATCHABLE__.api)||'/api';
+  const FEED_TYPE='com.upstox.marketdatafeederv3udapi.rpc.proto.FeedResponse';
+  const state={socket:null,reconnectTimer:null,reconnectAttempt:0,stopped:false,onTick:null,onState:null,subscriptions:new Set(['NSE_INDEX|Nifty 50','NSE_INDEX|Nifty Bank']),proto:null};
+
   window.optionEdgeLiveFeed={
     socket:null,
     reconnectTimer:null,
@@ -9,123 +12,100 @@
     stopped:false,
     onTick:null,
     onState:null,
-    subscriptions:new Set(['NSE_INDEX|Nifty 50','NSE_INDEX|Nifty Bank']),
+    subscriptions:state.subscriptions,
     subscribe(keys){
-      for(const key of (keys||[])) if(key) this.subscriptions.add(key);
-      if(this.socket && this.socket.readyState===WebSocket.OPEN) this.sendSubscription();
+      for(const key of (keys||[])) if(key) state.subscriptions.add(key);
+      if(state.socket&&state.socket.readyState===WebSocket.OPEN) sendSubscription();
     },
-    sendSubscription(){
-      if(!this.socket || this.socket.readyState!==WebSocket.OPEN) return;
-      const payload={guid:'optionedge-'+Date.now().toString(36),method:'sub',data:{mode:'ltpc',instrumentKeys:[...this.subscriptions]}};
-      this.socket.send(new TextEncoder().encode(JSON.stringify(payload)));
-    },
-    async connect(onTick,onState){
-      this.onTick=onTick||this.onTick;
-      this.onState=onState||this.onState;
-      this.stopped=false;
-      if(this.socket && (this.socket.readyState===WebSocket.OPEN || this.socket.readyState===WebSocket.CONNECTING)) return;
-      if(this.onState) this.onState('CONNECTING');
-      try{
-        const r=await fetch(API+'/upstox-market-feed-authorize',{headers:{Accept:'application/json'}});
-        const d=await r.json().catch(()=>({}));
-        if(!r.ok || !d.authorized_redirect_uri) throw new Error(d.error||'MARKET_FEED_AUTHORIZE_FAILED');
-        const ws=new WebSocket(d.authorized_redirect_uri);
-        this.socket=ws;
-        ws.binaryType='arraybuffer';
-        ws.onopen=()=>{
-          this.reconnectAttempt=0;
-          if(this.onState) this.onState('LIVE');
-          this.sendSubscription();
-        };
-        ws.onmessage=async(ev)=>{
-          try{
-            const buf=ev.data instanceof ArrayBuffer?ev.data:await ev.data.arrayBuffer();
-            const ticks=decodeFeedResponse(buf);
-            if(this.onTick) this.onTick(ticks);
-          }catch(e){ if(this.onState) this.onState('DECODE_ERROR'); }
-        };
-        ws.onerror=()=>{ if(this.onState) this.onState('ERROR'); };
-        ws.onclose=()=>{
-          if(this.socket===ws) this.socket=null;
-          if(this.onState) this.onState('DISCONNECTED');
-          if(!this.stopped){
-            const delay=Math.min(10000,1000*Math.pow(2,this.reconnectAttempt++));
-            clearTimeout(this.reconnectTimer);
-            this.reconnectTimer=setTimeout(()=>this.connect(),delay);
-          }
-        };
-      }catch(e){
-        if(this.onState) this.onState('ERROR');
-        if(!this.stopped){
-          const delay=Math.min(10000,1000*Math.pow(2,this.reconnectAttempt++));
-          clearTimeout(this.reconnectTimer);
-          this.reconnectTimer=setTimeout(()=>this.connect(),delay);
-        }
-      }
+    connect(onTick,onState){
+      state.onTick=onTick||state.onTick;
+      state.onState=onState||state.onState;
+      state.stopped=false;
+      this.onTick=state.onTick;this.onState=state.onState;
+      return connect();
     },
     disconnect(){
-      this.stopped=true;
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer=null;
-      if(this.socket){try{this.socket.close();}catch(e){} this.socket=null;}
-      if(this.onState) this.onState('DISCONNECTED');
+      state.stopped=true;clearTimeout(state.reconnectTimer);state.reconnectTimer=null;
+      if(state.socket){try{state.socket.close();}catch(e){}state.socket=null;}
+      this.socket=null;
+      if(state.onState)state.onState('DISCONNECTED');
     }
   };
 
-  function readVarint(bytes,state){
-    let value=0n,shift=0n;
-    while(state.i<bytes.length){
-      const b=bytes[state.i++];
-      value|=BigInt(b&127)<<shift;
-      if(!(b&128)) return value;
-      shift+=7n;
-      if(shift>70n) throw new Error('VARINT_TOO_LARGE');
-    }
-    throw new Error('TRUNCATED_VARINT');
+  function emitState(s){if(state.onState)state.onState(s);}
+  function sendSubscription(){
+    if(!state.socket||state.socket.readyState!==WebSocket.OPEN)return;
+    const payload={guid:'optionedge-'+Date.now().toString(36),method:'sub',data:{mode:'ltpc',instrumentKeys:[...state.subscriptions]}};
+    // Upstox V3 expects the JSON subscription payload as binary UTF-8 bytes.
+    state.socket.send(new TextEncoder().encode(JSON.stringify(payload)));
   }
-  function readLen(bytes,state){const n=Number(readVarint(bytes,state));const start=state.i;const end=start+n;if(end>bytes.length)throw new Error('TRUNCATED_FIELD');state.i=end;return bytes.subarray(start,end);}
-  function readFixed64(bytes,state){const start=state.i;state.i+=8;if(state.i>bytes.length)throw new Error('TRUNCATED_FIXED64');return new DataView(bytes.buffer,bytes.byteOffset+start,8).getFloat64(0,true);}
-  function skip(bytes,state,wire){if(wire===0){readVarint(bytes,state);return;}if(wire===1){state.i+=8;return;}if(wire===2){readLen(bytes,state);return;}if(wire===5){state.i+=4;return;}throw new Error('UNSUPPORTED_WIRE_TYPE');}
-  function parseLtpc(bytes){
-    const state={i:0};let ltp=null;
-    while(state.i<bytes.length){
-      const tag=Number(readVarint(bytes,state));const field=tag>>>3;const wire=tag&7;
-      if(field===1&&wire===1) ltp=readFixed64(bytes,state);
-      else skip(bytes,state,wire);
-    }
-    return ltp;
+  async function getProto(){
+    if(state.proto)return state.proto;
+    if(!window.protobuf)throw new Error('PROTOBUF_DECODER_NOT_LOADED');
+    const root=await protobuf.load('/MarketDataFeedV3.proto');
+    state.proto=root.lookupType(FEED_TYPE);
+    if(!state.proto)throw new Error('UPSTOX_FEED_PROTO_TYPE_NOT_FOUND');
+    return state.proto;
   }
-  function parseFeed(bytes){
-    const state={i:0};let ltp=null;
-    while(state.i<bytes.length){
-      const tag=Number(readVarint(bytes,state));const field=tag>>>3;const wire=tag&7;
-      if((field===1||field===2||field===3)&&wire===2){
-        const nested=readLen(bytes,state);
-        if(field===1){const v=parseLtpc(nested);if(v!==null)ltp=v;}
-        else if(field===2){
-          // FullFeed may wrap an indexFF/marketFF; indexFF is field 2 and contains ltpc field 1.
-          const s={i:0};
-          while(s.i<nested.length){
-            const t=Number(readVarint(nested,s));const f=t>>>3;const w=t&7;
-            if(f===2&&w===2){const index=readLen(nested,s);const v=parseLtpcFromIndex(index);if(v!==null)ltp=v;}
-            else if(f===1&&w===2){const market=readLen(nested,s);const v=parseLtpcFromMarket(market);if(v!==null)ltp=v;}
-            else skip(nested,s,w);
-          }
+  async function authorize(){
+    const r=await fetch(API+'/upstox-market-feed-authorize',{headers:{Accept:'application/json'}});
+    const d=await r.json().catch(()=>({}));
+    if(!r.ok)throw new Error(d.error||d.message||'MARKET_FEED_AUTHORIZE_FAILED');
+    const url=d.authorized_redirect_uri||d.websocket_url||d.data?.authorized_redirect_uri;
+    if(!url)throw new Error('MARKET_FEED_SOCKET_URL_MISSING');
+    return url;
+  }
+  function extractTicks(message){
+    const feeds=message?.feeds||{};const ticks=[];
+    for(const [instrument_key,feed] of Object.entries(feeds)){
+      const ltp=feed?.ltpc?.ltp
+        ?? feed?.fullFeed?.marketFF?.ltpc?.ltp
+        ?? feed?.fullFeed?.indexFF?.ltpc?.ltp
+        ?? feed?.firstLevelWithGreeks?.ltpc?.ltp;
+      if(Number.isFinite(Number(ltp)))ticks.push({instrument_key,ltp:Number(ltp),tick_ts:message?.currentTs||Date.now()});
+    }
+    return ticks;
+  }
+  async function connect(){
+    if(state.socket&&(state.socket.readyState===WebSocket.OPEN||state.socket.readyState===WebSocket.CONNECTING))return;
+    emitState('CONNECTING');
+    try{
+      await getProto();
+      const url=await authorize();
+      const ws=new WebSocket(url);ws.binaryType='arraybuffer';state.socket=ws;
+      window.optionEdgeLiveFeed.socket=ws;
+      ws.onopen=()=>{state.reconnectAttempt=0;emitState('LIVE');sendSubscription();};
+      ws.onmessage=async(ev)=>{
+        try{
+          let buffer=ev.data;
+          if(buffer instanceof Blob)buffer=await buffer.arrayBuffer();
+          if(!(buffer instanceof ArrayBuffer))return;
+          const msg=state.proto.decode(new Uint8Array(buffer));
+          const obj=state.proto.toObject(msg,{longs:Number,enums:String,defaults:false});
+          const ticks=extractTicks(obj);
+          if(ticks.length&&state.onTick)state.onTick(ticks);
+        }catch(e){
+          // Keep the connection alive on an isolated decode error; the next tick may be valid.
+          console.warn('OptionEdge market-feed decode error',e);
         }
-      }else skip(bytes,state,wire);
+      };
+      ws.onerror=()=>emitState('ERROR');
+      ws.onclose=()=>{
+        if(state.socket===ws)state.socket=null;
+        window.optionEdgeLiveFeed.socket=null;
+        emitState('DISCONNECTED');
+        if(!state.stopped){
+          const delay=Math.min(10000,1000*Math.pow(2,state.reconnectAttempt++));
+          clearTimeout(state.reconnectTimer);state.reconnectTimer=setTimeout(connect,delay);
+        }
+      };
+    }catch(e){
+      console.warn('OptionEdge market-feed connection error',e);
+      emitState('ERROR');
+      if(!state.stopped){
+        const delay=Math.min(10000,1000*Math.pow(2,state.reconnectAttempt++));
+        clearTimeout(state.reconnectTimer);state.reconnectTimer=setTimeout(connect,delay);
+      }
     }
-    return ltp;
-  }
-  function parseLtpcFromIndex(bytes){const state={i:0};while(state.i<bytes.length){const tag=Number(readVarint(bytes,state));const field=tag>>>3;const wire=tag&7;if(field===1&&wire===2)return parseLtpc(readLen(bytes,state));skip(bytes,state,wire);}return null;}
-  function parseLtpcFromMarket(bytes){const state={i:0};while(state.i<bytes.length){const tag=Number(readVarint(bytes,state));const field=tag>>>3;const wire=tag&7;if(field===1&&wire===2)return parseLtpc(readLen(bytes,state));skip(bytes,state,wire);}return null;}
-  function parseMapEntry(bytes){
-    const state={i:0};let key=null,value=null;
-    while(state.i<bytes.length){const tag=Number(readVarint(bytes,state));const field=tag>>>3;const wire=tag&7;if(field===1&&wire===2)key=new TextDecoder().decode(readLen(bytes,state));else if(field===2&&wire===2)value=readLen(bytes,state);else skip(bytes,state,wire);}
-    return {key,value};
-  }
-  function decodeFeedResponse(buffer){
-    const bytes=new Uint8Array(buffer),state={i:0},out=[];
-    while(state.i<bytes.length){const tag=Number(readVarint(bytes,state));const field=tag>>>3;const wire=tag&7;if(field===2&&wire===2){const entry=parseMapEntry(readLen(bytes,state));if(entry.key&&entry.value){const ltp=parseFeed(entry.value);if(Number.isFinite(ltp))out.push({instrument_key:entry.key,ltp});}}else skip(bytes,state,wire);}
-    return out;
   }
 })();

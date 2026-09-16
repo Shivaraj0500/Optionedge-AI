@@ -554,6 +554,37 @@ async function cycle(req, res, campaign) {
   return await openNewStructure(req, res, campaign, strategyObj, connection, ctx, chain, 'ENTRY_SIGNAL');
 }
 
+async function reconcileRecovery(req, res, campaign) {
+  const userId = req.user.id;
+  const openQ = await db.query("SELECT * FROM paper_campaign_legs WHERE user_id=$1 AND campaign_id=$2 AND status='OPEN' ORDER BY execution_rank", [userId, campaign.id]);
+  const strategyQ = await db.query('SELECT * FROM strategy_configs WHERE id=$1 AND user_id=$2 LIMIT 1', [campaign.strategy_id, userId]);
+  if (!strategyQ.rows[0]) throw new Error('STRATEGY_NOT_FOUND');
+  const base = strategyQ.rows[0];
+  const versionQ = await db.query('SELECT version_number, config FROM strategy_versions WHERE strategy_id=$1 AND user_id=$2 AND version_number=$3 LIMIT 1', [campaign.strategy_id, userId, Number(campaign.strategy_version || base.version || 1)]);
+  if (!versionQ.rows[0]) throw new Error('STRATEGY_VERSION_NOT_FOUND');
+  const pinned = versionQ.rows[0].config && typeof versionQ.rows[0].config === 'object' ? versionQ.rows[0].config : {};
+  const strategy = { ...base, ...pinned, option_expiry: pinned.option_expiry || base.option_expiry, id: base.id, version: Number(versionQ.rows[0].version_number), leg_config: pinned.legs || base.leg_config || [] };
+  if (!openQ.rows.length) {
+    await db.query("UPDATE paper_campaigns SET recovery_required=false, cycle_lock_until=null, last_cycle_at=now(), last_status='RECOVERED', last_reason='NO_OPEN_LEGS', updated_at=now() WHERE id=$1 AND user_id=$2", [campaign.id, userId]);
+    return res.json({ ...(await state(userId, campaign.id)), cycle: { action: 'RECOVER', reason: 'NO_OPEN_LEGS', broker_orders_sent: false } });
+  }
+  const nowMinutes = nowIstMinutes();
+  const start = minutesOf(strategy.start_time || '09:45');
+  const squareOff = minutesOf(strategy.square_off || '15:15');
+  if (nowMinutes < start || nowMinutes >= squareOff) return res.status(409).json({ ...(await state(userId, campaign.id)), error: 'RECOVERY_MARKET_CLOSED', broker_orders_sent: false });
+  const connection = await broker(req);
+  const ctx = await marketContext(connection, strategy, req);
+  const chain = await optionChain(connection, strategy, userId);
+  const expected = (Array.isArray(strategy.leg_config) ? strategy.leg_config : []).filter(x => x.enabled !== false);
+  const expectedIds = new Set(expected.map(x => String(x.id)));
+  const activeIds = new Set(openQ.rows.map(x => String(x.leg_id)));
+  if (expected.length !== openQ.rows.length || [...expectedIds].some(id => !activeIds.has(id))) throw new Error('STRUCTURE_INTEGRITY_MISMATCH');
+  const marks = await markOpenLegs(userId, campaign.id, chain);
+  await db.query("UPDATE paper_campaigns SET recovery_required=false, cycle_lock_until=null, last_cycle_at=now(), last_status='ACTIVE', last_reason='RECOVERY_RECONCILED', updated_at=now() WHERE id=$1 AND user_id=$2", [campaign.id, userId]);
+  await recordDecision(userId, campaign, strategy, ctx, 'ACTIVE', 'RECOVERY_RECONCILED', 'ACTIVE_POSITION', { action: 'HOLD' }, { mtm_pnl: marks.mtm, reconciled_legs: marks.legs.length, recovery: true, note: 'Recovery cleared only after all open legs were validated against the live option chain and freshly marked.' });
+  return res.json({ ...(await state(userId, campaign.id)), cycle: { action: 'RECOVER', reason: 'RECOVERY_RECONCILED', mtm_pnl: marks.mtm, broker_orders_sent: false } });
+}
+
 async function openNewStructure(req, res, campaign, strategy, connection, ctx, chain, trigger) {
   const userId = req.user.id;
   // Both a fresh entry and a roll resolve the complete configured structure.
@@ -618,6 +649,15 @@ export default async function(req, res) {
   const q = campaignId ? await db.query('SELECT * FROM paper_campaigns WHERE id=$1 AND user_id=$2 LIMIT 1', [campaignId, userId]) : await db.query("SELECT * FROM paper_campaigns WHERE user_id=$1 AND status='RUNNING' ORDER BY started_at DESC LIMIT 1", [userId]);
   const campaign = q.rows[0];
   if (!campaign) return res.status(404).json({ error: 'PAPER_CAMPAIGN_NOT_RUNNING' });
+
+  if (action === 'RECOVER') {
+    try {
+      return await reconcileRecovery(req, res, campaign);
+    } catch (error) {
+      const message = String(error?.message || 'PAPER_RECOVERY_FAILED');
+      return res.status(409).json({ ...(await state(userId, campaign.id)), error: message, broker_orders_sent: false });
+    }
+  }
 
   if (campaign.recovery_required && action !== 'KILL' && action !== 'STOP') {
     return res.status(409).json({ ...(await state(userId, campaign.id)), error: 'PAPER_RECOVERY_REQUIRED', broker_orders_sent: false });

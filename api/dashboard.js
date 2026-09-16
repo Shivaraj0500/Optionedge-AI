@@ -34,9 +34,10 @@ async function liveLtp(connection, instrumentKeys) {
   if (!response.ok || data.status !== 'success') throw new Error('UPSTOX_LTP_FAILED');
   const out = {};
   for (const [key, value] of Object.entries(data.data || {})) {
-    const instrumentKey = value?.instrument_token || key;
     const price = n(value?.last_price);
-    if (instrumentKey && price != null) out[instrumentKey] = price;
+    if (price == null) continue;
+    out[key] = price;
+    if (value?.instrument_token) out[value.instrument_token] = price;
   }
   return out;
 }

@@ -1,3 +1,0 @@
-syntax = "proto3";
-package google.protobuf;
-message DoubleValue { double value = 1; }

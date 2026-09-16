@@ -68,7 +68,7 @@ async function liveIndex(connection, underlying, timeframe = '15m') {
     const close = n(row?.[4]);
     if (ts && close != null) map.set(ts, { timestamp: ts, open: n(row[1]), high: n(row[2]), low: n(row[3]), close, volume: n(row[5], 0) });
   }
-  const candles = [...map.values()].sort((a,b)=>new Date(a.timestamp)-new Date(b.timestamp)).filter(c => new Date(c.timestamp).getTime() + minutes*60000 <= now);
+  const candles = [...map.values()].sort((a,b)=>new Date(a.timestamp)-new Date(b.timestamp));
   if (!candles.length) throw new Error('MARKET_DATA_UNAVAILABLE');
   const last = candles[candles.length - 1];
   // Wilder-style ADX/DI, matching the existing indicator engine.
@@ -92,7 +92,7 @@ async function liveIndex(connection, underlying, timeframe = '15m') {
   for(let i=period;i<dx.length;i++) adx=((adx*(period-1))+dx[i])/period;
   const liveQuotes = await liveLtp(connection, [instrumentKey]);
   const liveSpot = n(liveQuotes[instrumentKey]);
-  return { underlying, timeframe, price:liveSpot ?? last.close, price_source:liveSpot!=null?'UPSTOX_LTP_V3':'UPSTOX_COMPLETED_CANDLE_CLOSE', adx, plus_di:plusDi, minus_di:minusDi, atr, completed_candle:last.timestamp, source:'UPSTOX' };
+  return { underlying, timeframe, price:liveSpot ?? last.close, price_source:liveSpot!=null?'UPSTOX_LTP_V3':'UPSTOX_CANDLE_CLOSE', adx, plus_di:plusDi, minus_di:minusDi, atr, indicator_candle:last.timestamp, indicator_live:true, source:'UPSTOX' };
 }
 
 export default async function(req,res){

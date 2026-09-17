@@ -497,7 +497,9 @@ async function cycle(req, res, campaign) {
   }
 
   if (openQ.rows.length) {
-    const expected = (Array.isArray(strategyObj.leg_config) ? strategyObj.leg_config : []).filter(x => x.enabled !== false);
+    const transitionDirection = campaign.signal_direction || (strategyObj.signal_model === 'ST_EMA_RSI_TRANSITION' ? (String(strategyObj.signal_config?.trade_direction||'BOTH') === 'LONG_ONLY' ? 'BUY' : String(strategyObj.signal_config?.trade_direction||'BOTH') === 'SHORT_ONLY' ? 'SELL' : null) : null);
+    const expectedSource = strategyObj.signal_model === 'ST_EMA_RSI_TRANSITION' ? (transitionDirection === 'SELL' ? strategyObj.signal_config?.short_legs : strategyObj.signal_config?.long_legs) : strategyObj.leg_config;
+    const expected = (Array.isArray(expectedSource) ? expectedSource : []).filter(x => x.enabled !== false);
     const activeIds = new Set(openQ.rows.map(x => String(x.leg_id)));
     const expectedIds = new Set(expected.map(x => String(x.id)));
     const structureMismatch = expected.length !== openQ.rows.length || [...expectedIds].some(id => !activeIds.has(id));
@@ -620,9 +622,11 @@ async function openNewStructure(req, res, campaign, strategy, connection, ctx, c
   // A roll has already closed every old leg, including hedges, so there is no
   // retained contract that could become orphaned or mismatched with the new ATM.
   const rolling = trigger === 'ROLL_REENTRY';
-  const configured = Array.isArray(strategy.leg_config)
-    ? strategy.leg_config.filter(x => x.enabled !== false)
-    : [];
+  const transitionDirection = strategy.signal_model === 'ST_EMA_RSI_TRANSITION' ? (String(trigger).includes('TRANSITION_SELL') ? 'SELL' : String(trigger).includes('TRANSITION_BUY') ? 'BUY' : campaign.signal_direction) : null;
+  const transitionLegs = transitionDirection === 'SELL' ? strategy.signal_config?.short_legs : strategy.signal_config?.long_legs;
+  const configured = strategy.signal_model === 'ST_EMA_RSI_TRANSITION'
+    ? (Array.isArray(transitionLegs) ? transitionLegs.filter(x => x.enabled !== false) : [])
+    : (Array.isArray(strategy.leg_config) ? strategy.leg_config.filter(x => x.enabled !== false) : []);
   if (!configured.length) return res.status(422).json({ error: 'NO_ENABLED_STRATEGY_LEGS' });
   const selected = [];
   for (const leg of configured) {

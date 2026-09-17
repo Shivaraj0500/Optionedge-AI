@@ -19,7 +19,7 @@ export default async function(req,res){
   if(!key)return res.status(400).json({error:'UNSUPPORTED_UNDERLYING'});
   if(!m)return res.status(400).json({error:'INVALID_TIMEFRAME'});
   const candleType=String(req.query?.candle_type||'HEIKIN_ASHI').toUpperCase()==='OHLC'?'OHLC':'HEIKIN_ASHI';
-  const cfg={supertrend_period:Number(req.query?.supertrend_period||10),supertrend_multiplier:Number(req.query?.supertrend_multiplier||2),ema_period:Number(req.query?.ema_period||50),rsi_period:Number(req.query?.rsi_period||14),rsi_long_threshold:Number(req.query?.rsi_long_threshold||60),rsi_short_threshold:Number(req.query?.rsi_short_threshold||40)};
+  const tradeDirection=['BOTH','LONG_ONLY','SHORT_ONLY'].includes(String(req.query?.trade_direction||'BOTH').toUpperCase())?String(req.query?.trade_direction||'BOTH').toUpperCase():'BOTH';const cfg={trade_direction:tradeDirection,supertrend_period:Number(req.query?.supertrend_period||10),supertrend_multiplier:Number(req.query?.supertrend_multiplier||2),ema_period:Number(req.query?.ema_period||50),rsi_period:Number(req.query?.rsi_period||14),rsi_long_threshold:Number(req.query?.rsi_long_threshold||60),rsi_short_threshold:Number(req.query?.rsi_short_threshold||40)};
   if(!Number.isFinite(cfg.supertrend_period)||cfg.supertrend_period<2||!Number.isFinite(cfg.supertrend_multiplier)||cfg.supertrend_multiplier<=0||!Number.isFinite(cfg.ema_period)||cfg.ema_period<2||!Number.isFinite(cfg.rsi_period)||cfg.rsi_period<2)return res.status(400).json({error:'INVALID_INDICATOR_PARAMETERS'});
   const q=await db.query('SELECT access_token,expires_at,status FROM broker_connections WHERE user_id=$1 LIMIT 1',[req.user.id]);
   const b=q.rows[0];

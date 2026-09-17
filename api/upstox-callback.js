@@ -64,7 +64,7 @@ export default async function(req, res) {
       'INSERT INTO broker_connections (user_id, access_token, refresh_token, user_name, email, connected_at, expires_at, status, updated_at) VALUES ($1,$2,$3,$4,$5,now(),$6,$7,now()) ON CONFLICT (user_id) DO UPDATE SET access_token=EXCLUDED.access_token, refresh_token=EXCLUDED.refresh_token, user_name=EXCLUDED.user_name, email=EXCLUDED.email, connected_at=EXCLUDED.connected_at, expires_at=EXCLUDED.expires_at, status=EXCLUDED.status, updated_at=now()',
       [user.id, data.access_token, data.refresh_token || null, profile.user_name || profile.user_id || '', profile.email || user.email || '', expires, 'CONNECTED']
     );
-    return res.redirect('/?broker=connected');
+    return res.redirect('/?broker=connected&build=' + Date.now());
   } catch (e) {
     console.error('Upstox callback failed', e);
     return res.status(502).send('Upstox connection failed. Restart the connection from OptionEdge AI.');

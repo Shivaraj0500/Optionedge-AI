@@ -446,6 +446,7 @@ async function cycle(req, res, campaign) {
   // fresh market data before square-off/management.
   const currentMinutes = nowIstMinutes();
   const start = minutesOf(strategyObj.start_time || '09:45');
+  const isPositional = strategyObj.overnight_exposure === true;
   const squareOff = policyMinutesOf(INTRADAY_SQUARE_OFF);
   const openQ = await db.query('SELECT * FROM paper_campaign_legs WHERE user_id=$1 AND campaign_id=$2 AND status=$3 ORDER BY execution_rank', [userId, campaign.id, 'OPEN']);
 
@@ -453,9 +454,9 @@ async function cycle(req, res, campaign) {
     await db.query("UPDATE paper_campaigns SET last_status='WAITING', last_reason='OUTSIDE_TRADING_WINDOW', updated_at=now(), cycle_lock_until=null, recovery_required=false WHERE id=$1 AND user_id=$2", [campaign.id, userId]);
     return res.json({ ...(await state(userId, campaign.id)), cycle: { action: 'NONE', reason: 'OUTSIDE_TRADING_WINDOW', trading_window: { start_time: strategyObj.start_time || '09:45', square_off: strategyObj.square_off || '15:15' } }, broker_orders_sent: false });
   }
-  if (currentMinutes >= squareOff && !openQ.rows.length) {
+  if (!isPositional && currentMinutes >= squareOff && !openQ.rows.length) {
     await db.query("UPDATE paper_campaigns SET status='RUNNING', closed_at=null, last_status='WAITING', last_reason='OUTSIDE_TRADING_WINDOW', updated_at=now(), cycle_lock_until=null, recovery_required=false WHERE id=$1 AND user_id=$2", [campaign.id, userId]);
-    return res.json({ ...(await state(userId, campaign.id)), cycle: { action: 'NONE', reason: 'OUTSIDE_TRADING_WINDOW', trading_window: { start_time: strategyObj.start_time || '09:45', square_off: strategyObj.square_off || '15:15' }, persistent_session: true }, broker_orders_sent: false });
+    return res.json({ ...(await state(userId, campaign.id)), cycle: { action: 'NONE', reason: 'OUTSIDE_TRADING_WINDOW', trading_window: { start_time: strategyObj.start_time || '09:45', square_off: '15:15' }, persistent_session: true }, broker_orders_sent: false });
   }
 
   const connection = await broker(req);
@@ -465,7 +466,7 @@ async function cycle(req, res, campaign) {
     throw new Error('MARKET_CONTEXT_INVALID');
   }
 
-  if (currentMinutes >= squareOff) {
+  if (!isPositional && currentMinutes >= squareOff) {
     if (openQ.rows.length) {
       const result = await closeOpenLegs(userId, campaign, chain, 'SQUARE_OFF');
       // Square-off closes today's simulated exposure, while the campaign remains
@@ -597,8 +598,9 @@ async function reconcileRecovery(req, res, campaign) {
   }
   const nowMinutes = nowIstMinutes();
   const start = minutesOf(strategy.start_time || '09:45');
+  const isPositional = strategy.overnight_exposure === true;
   const squareOff = policyMinutesOf(INTRADAY_SQUARE_OFF);
-  if (nowMinutes < start || nowMinutes >= squareOff) return res.status(409).json({ ...(await state(userId, campaign.id)), error: 'RECOVERY_MARKET_CLOSED', broker_orders_sent: false });
+  if (nowMinutes < start || (!isPositional && nowMinutes >= squareOff)) return res.status(409).json({ ...(await state(userId, campaign.id)), error: 'RECOVERY_MARKET_CLOSED', broker_orders_sent: false });
   const connection = await broker(req);
   const ctx = await marketContext(connection, strategy, req);
   const chain = await optionChain(connection, strategy, userId);

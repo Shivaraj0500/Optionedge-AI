@@ -122,6 +122,7 @@ export default async function(req,res){
 
     const afterQ=await db.query("SELECT status,recovery_required FROM live_campaigns WHERE id=$1 AND user_id=$2 LIMIT 1",[fresh.id,userId]);
     const after=afterQ.rows[0]||fresh;
+    await db.query('INSERT INTO audit_events(user_id,event_type,entity_type,entity_id,details) VALUES($1,$2,$3,$4,$5)',[userId,'LIVE_SUPERVISOR_RUN','live_campaign',fresh.id,JSON.stringify({orders,positions,cycle,recovery_required:!!after.recovery_required})]);
     results.push({user_id:userId,campaign_id:fresh.id,orders,positions,recovery_required:!!after.recovery_required,cycle});
 
     // Chain the next five-minute firing only while the live campaign is still

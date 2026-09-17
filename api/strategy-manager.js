@@ -73,7 +73,9 @@ export default async function(req,res){
       if(!underlyings.includes(cfg.underlying)) errors.push('Unsupported underlying');
       if(!timeframes.includes(cfg.timeframe)) errors.push('Unsupported timeframe');
       if(!candles.includes(cfg.candle_type)) errors.push('Unsupported candle type');
-      if(!/^([01]\\d|2[0-3]):[0-5]\\d$/.test(cfg.start_time||'')) errors.push('Invalid start time');
+      const startTime=String(cfg.start_time||'');
+      const startMatch=startTime.match(/^(\d{2}):(\d{2})$/);
+      if(!startMatch || Number(startMatch[1])>23 || Number(startMatch[2])>59) errors.push('Invalid start time');
       if(!cfg.overnight_exposure && cfg.square_off!=='15:15') errors.push('Intraday strategies must use the global 15:15 IST square-off.');
       if(cfg.overnight_exposure && cfg.square_off!=null) errors.push('Positional strategies must not have an intraday square-off.');
       if(cfg.signal_model==='ST_EMA_RSI_TRANSITION'){
@@ -90,7 +92,7 @@ export default async function(req,res){
         if(Number(cfg.adx_period)<2) errors.push('ADX period must be >= 2');
         if(Number(cfg.atr_period)<2) errors.push('ATR period must be >= 2');
         if(!(Number(cfg.atr_multiplier)>0)) errors.push('ATR multiplier must be positive');
-        const legs=Array.isArray(cfg.leg_config)?cfg.leg_config:[];
+        const legs=Array.isArray(cfg.leg_config)?cfg.leg_config:(Array.isArray(cfg.legs)?cfg.legs:[]);
         if(legs.length<2) errors.push('Option Selling strategy requires at least two legs.');
         legs.forEach((l,i)=>{
           if(!['CE','PE'].includes(l.option_type)) errors.push(`Leg ${i+1}: option type must be CE or PE`);

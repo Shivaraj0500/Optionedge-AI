@@ -14,6 +14,10 @@ write = "own"
 read = "own"
 write = "own"
 
+[db.tables.trading_journal_entries]
+read = "own"
+write = "own"
+
 # Legacy research tables are retired by migration.
 
 [db.tables.broker_connections]

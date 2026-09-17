@@ -150,14 +150,14 @@ export default async function (req, res) {
 
   if (req.method === 'GET') {
     const q = await db.query(
-      'SELECT * FROM strategy_configs WHERE user_id = $1 ORDER BY updated_at DESC',
+      "SELECT * FROM strategy_configs WHERE user_id = $1 AND COALESCE(signal_model,'LEGACY_ADX_RANGE') = 'LEGACY_ADX_RANGE' ORDER BY updated_at DESC",
       [user.id]
     );
     return res.json({ strategies: q.rows.map(asStrategy) });
   }
 
   if (req.method === 'POST') {
-    const config = normalizeConfig(req.body || {});
+    const config = normalizeConfig({ ...(req.body || {}), signal_model: 'LEGACY_ADX_RANGE' });
     const inserted = await db.query(
       `INSERT INTO strategy_configs
         (user_id, name, underlying, option_expiry, timeframe, candle_type, start_time, square_off, overnight_exposure,
@@ -191,7 +191,7 @@ export default async function (req, res) {
     const existing = await db.query('SELECT * FROM strategy_configs WHERE id = $1 AND user_id = $2 LIMIT 1', [strategyId, user.id]);
     if (!existing.rows[0]) return res.status(404).json({ error: 'strategy not found' });
     const current = asStrategy(existing.rows[0]);
-    const config = normalizeConfig({ ...current, ...(req.body || {}) });
+    const config = normalizeConfig({ ...current, ...(req.body || {}), signal_model: 'LEGACY_ADX_RANGE' });
     const nextVersion = Number(current.version || 1) + 1;
     const updated = await db.query(
       `UPDATE strategy_configs

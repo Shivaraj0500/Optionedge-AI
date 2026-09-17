@@ -54,6 +54,18 @@ write = "own"
 read = "own"
 write = "own"
 
+[db.tables.live_campaigns]
+read = "own"
+write = "own"
+
+[db.tables.live_campaign_legs]
+read = "own"
+write = "own"
+
+[db.tables.live_decisions]
+read = "own"
+write = "own"
+
 [db.tables.strategy_configs]
 read = "own"
 write = "own"

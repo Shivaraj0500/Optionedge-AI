@@ -1,0 +1,22 @@
+CREATE TABLE IF NOT EXISTS live_campaigns (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id TEXT NOT NULL,
+  strategy_id UUID REFERENCES strategy_configs(id) ON DELETE SET NULL,
+  strategy_version INTEGER NOT NULL DEFAULT 1,
+  underlying TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'RUNNING',
+  mode TEXT NOT NULL DEFAULT 'LIVE_UPSTOX',
+  started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  closed_at TIMESTAMPTZ,
+  entry_spot NUMERIC,
+  corridor_upper NUMERIC,
+  corridor_lower NUMERIC,
+  active_expiry TEXT,
+  realized_pnl NUMERIC NOT NULL DEFAULT 0,
+  last_cycle_at TIMESTAMPTZ,
+  last_status TEXT,
+  last_reason TEXT,
+  recovery_required BOOLEAN NOT NULL DEFAULT false,
+  cycle_lock_until TIMESTAMPTZ
+)

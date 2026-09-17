@@ -6,7 +6,7 @@ export const methods = ['GET'];
 function istDateOnly(value) { const d=new Date(value||Date.now()); return new Date(d.getTime()+330*60*1000).toISOString().slice(0,10); }
 function num(v,fallback=null){const n=Number(v);return Number.isFinite(n)?n:fallback;}
 function obj(v){return v&&typeof v==='object'?v:{};}
-function strategySnapshot(config,underlying){const c=obj(config);return{name:c.name||null,underlying:c.underlying||underlying,timeframe:c.timeframe||null,candle_type:c.candle_type||null,start_time:c.start_time||null,square_off:c.square_off||'15:15',adx_period:c.adx_period??null,adx_threshold:c.adx_threshold??null,atr_period:c.atr_period??null,atr_multiplier:c.atr_multiplier??null,confirmation_candles:c.confirmation_candles??null,roll_mode:c.roll_mode||null,regime_rule:c.regime_rule||null,option_expiry:c.option_expiry||null,legs:c.legs||null};}
+function strategySnapshot(config,underlying){const c=obj(config);return{name:c.name||null,underlying:c.underlying||underlying,timeframe:c.timeframe||null,candle_type:c.candle_type||null,start_time:c.start_time||null,square_off:c.square_off||'15:15',signal_model:c.signal_model||'LEGACY_ADX_RANGE',signal_config:c.signal_config||null,adx_period:c.adx_period??null,adx_threshold:c.adx_threshold??null,atr_period:c.atr_period??null,atr_multiplier:c.atr_multiplier??null,confirmation_candles:c.confirmation_candles??null,roll_mode:c.roll_mode||null,regime_rule:c.regime_rule||null,option_expiry:c.option_expiry||null,legs:c.legs||null};}
 
 async function syncUser(userId){
   const [paper,live,versions,pRolls,lRolls,orders]=await Promise.all([

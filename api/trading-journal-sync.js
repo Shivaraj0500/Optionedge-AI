@@ -7,7 +7,7 @@ export const schedule = '0 * * * *';
 function istDateOnly(value) { return new Date(new Date(value || Date.now()).getTime() + 330 * 60 * 1000).toISOString().slice(0, 10); }
 function json(v) { return v && typeof v === 'object' ? v : {}; }
 function n(v, d = null) { const x = Number(v); return Number.isFinite(x) ? x : d; }
-function snap(x, base) { return { name:x.name||null, underlying:x.underlying||base, timeframe:x.timeframe||null, candle_type:x.candle_type||null, start_time:x.start_time||null, square_off:x.square_off||'15:15', adx_period:x.adx_period??null, adx_threshold:x.adx_threshold??null, atr_period:x.atr_period??null, atr_multiplier:x.atr_multiplier??null, confirmation_candles:x.confirmation_candles??null, roll_mode:x.roll_mode||null, regime_rule:x.regime_rule||null, option_expiry:x.option_expiry||null, legs:x.legs||null }; }
+function snap(x, base) { return { name:x.name||null, underlying:x.underlying||base, timeframe:x.timeframe||null, candle_type:x.candle_type||null, start_time:x.start_time||null, square_off:x.square_off||'15:15', signal_model:x.signal_model||'LEGACY_ADX_RANGE', signal_config:x.signal_config||null, adx_period:x.adx_period??null, adx_threshold:x.adx_threshold??null, atr_period:x.atr_period??null, atr_multiplier:x.atr_multiplier??null, confirmation_candles:x.confirmation_candles??null, roll_mode:x.roll_mode||null, regime_rule:x.regime_rule||null, option_expiry:x.option_expiry||null, legs:x.legs||null }; }
 
 async function syncUser(userId) {
   const [paper, live, versions, pr, lr, orders] = await Promise.all([

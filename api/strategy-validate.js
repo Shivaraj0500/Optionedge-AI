@@ -44,7 +44,7 @@ export default async function (req, res) {
   if (Number(s.atr_period) < 2) errors.push('ATR period must be >= 2');
   if (s.signal_model === 'ST_EMA_RSI_TRANSITION') {
     const sc = s.signal_config && typeof s.signal_config === 'object' ? s.signal_config : {};
-    if (s.timeframe !== '15m') errors.push('ST + EMA50 + RSI transition strategy must use the 15m timeframe.');
+    if (!ALLOWED_TIMEFRAMES.includes(s.timeframe)) errors.push('ST + EMA50 + RSI transition strategy has an unsupported timeframe.');
     if (s.candle_type !== 'HEIKIN_ASHI') errors.push('ST + EMA50 + RSI transition strategy must use Heikin Ashi candles.');
     if (Number(sc.supertrend_period) < 2) errors.push('Supertrend period must be >= 2.');
     if (!(Number(sc.supertrend_multiplier) > 0)) errors.push('Supertrend multiplier must be positive.');

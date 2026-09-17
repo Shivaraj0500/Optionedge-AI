@@ -67,6 +67,42 @@ export default async function(req,res){
     if(!strategyId||!versionId) return res.status(400).json({error:'strategy_id and version_id required'});
     const source=await assertVersion(uid,strategyId,versionId);
     const cfg=safeConfig(source.config);
+    if(action==='VALIDATE_VERSION'){
+      const errors=[];
+      const candles=['OHLC','HEIKIN_ASHI'], timeframes=['3m','5m','15m','30m','1h'], underlyings=['NIFTY 50','BANK NIFTY','SENSEX','BANKEX'];
+      if(!underlyings.includes(cfg.underlying)) errors.push('Unsupported underlying');
+      if(!timeframes.includes(cfg.timeframe)) errors.push('Unsupported timeframe');
+      if(!candles.includes(cfg.candle_type)) errors.push('Unsupported candle type');
+      if(!/^([01]\\d|2[0-3]):[0-5]\\d$/.test(cfg.start_time||'')) errors.push('Invalid start time');
+      if(!cfg.overnight_exposure && cfg.square_off!=='15:15') errors.push('Intraday strategies must use the global 15:15 IST square-off.');
+      if(cfg.overnight_exposure && cfg.square_off!=null) errors.push('Positional strategies must not have an intraday square-off.');
+      if(cfg.signal_model==='ST_EMA_RSI_TRANSITION'){
+        const sc=safeConfig(cfg.signal_config);
+        if(!['BOTH','LONG_ONLY','SHORT_ONLY'].includes(String(sc.trade_direction||'BOTH'))) errors.push('Trade direction must be BOTH, LONG_ONLY or SHORT_ONLY.');
+        if(!Array.isArray(sc.long_legs)||!sc.long_legs.length) errors.push('At least one Long / BUY leg is required.');
+        if(!Array.isArray(sc.short_legs)||!sc.short_legs.length) errors.push('At least one Short / SELL leg is required.');
+        if(Number(sc.supertrend_period)<2) errors.push('Supertrend period must be >= 2.');
+        if(!(Number(sc.supertrend_multiplier)>0)) errors.push('Supertrend multiplier must be positive.');
+        if(Number(sc.ema_period)<2) errors.push('EMA period must be >= 2.');
+        if(Number(sc.rsi_period)<2) errors.push('RSI period must be >= 2.');
+        if(!(Number(sc.rsi_long_threshold)>Number(sc.rsi_short_threshold))) errors.push('BUY RSI threshold must be above SELL RSI threshold.');
+      } else {
+        if(Number(cfg.adx_period)<2) errors.push('ADX period must be >= 2');
+        if(Number(cfg.atr_period)<2) errors.push('ATR period must be >= 2');
+        if(!(Number(cfg.atr_multiplier)>0)) errors.push('ATR multiplier must be positive');
+        const legs=Array.isArray(cfg.leg_config)?cfg.leg_config:[];
+        if(legs.length<2) errors.push('Option Selling strategy requires at least two legs.');
+        legs.forEach((l,i)=>{
+          if(!['CE','PE'].includes(l.option_type)) errors.push(`Leg ${i+1}: option type must be CE or PE`);
+          if(!['BUY','SELL'].includes(l.side)) errors.push(`Leg ${i+1}: side must be BUY or SELL`);
+          if(!(Number(l.quantity)>0)) errors.push(`Leg ${i+1}: quantity must be positive`);
+        });
+      }
+      const valid=!errors.length;
+      await db.query('UPDATE strategy_versions SET status=$1 WHERE id=$2 AND strategy_id=$3 AND user_id=$4',[valid?'VALIDATED':'DRAFT',versionId,strategyId,uid]);
+      await db.query('INSERT INTO audit_events(user_id,event_type,entity_type,entity_id,details) VALUES($1,$2,$3,$4,$5)',[uid,valid?'STRATEGY_VERSION_VALIDATED':'STRATEGY_VERSION_VALIDATION_FAILED','strategy_version',versionId,JSON.stringify({strategy_id:strategyId,version:source.version_number,errors})]);
+      return res.json({valid,status:valid?'VALIDATED':'DRAFT',errors,version:source.version_number,version_id:versionId});
+    }
     if(action==='DUPLICATE_VERSION'){
       const next=await db.query('SELECT COALESCE(MAX(version_number),0)+1 version FROM strategy_versions WHERE strategy_id=$1 AND user_id=$2',[strategyId,uid]);
       const nextVersion=Number(next.rows[0].version);

@@ -34,7 +34,7 @@ async function reconcileOrders(userId, campaign) {
       await db.query('UPDATE live_orders SET status=$1,filled_quantity=$2,average_price=$3,error_message=$4,updated_at=now() WHERE id=$5 AND user_id=$6',[status,filled,avg,(status==='REJECTED'||status==='CANCELLED')?(d.status_message||d.status_message_raw||null):null,o.id,userId]);
       updated++;
 
-      const legs = await db.query('SELECT * FROM live_campaign_legs WHERE id=$1 AND user_id=$2 LIMIT 1',[o.leg_id,userId]);
+      const legs = await db.query('SELECT * FROM live_campaign_legs WHERE campaign_id=$1 AND leg_id=$2 AND user_id=$3 ORDER BY entry_at DESC LIMIT 1',[campaign.id,o.leg_id,userId]);
       const leg = legs.rows[0];
       if (!leg) continue;
       if (String(o.id) === String(leg.entry_order_id)) {

@@ -434,7 +434,9 @@ async function cycle(req, res, campaign) {
   const s = await db.query('SELECT * FROM strategy_configs WHERE id=$1 AND user_id=$2 LIMIT 1', [campaign.strategy_id, userId]);
   const strategyBase = s.rows[0];
   if (!strategyBase) return res.status(404).json({ error: 'STRATEGY_NOT_FOUND' });
-  const versionQ = await db.query('SELECT version_number, config FROM strategy_versions WHERE strategy_id=$1 AND user_id=$2 AND version_number=$3 LIMIT 1', [campaign.strategy_id, userId, Number(campaign.strategy_version || strategyBase.version || 1)]);
+  const versionQ = campaign.strategy_version_id
+    ? await db.query('SELECT id, version_number, config FROM strategy_versions WHERE id=$1 AND strategy_id=$2 AND user_id=$3 LIMIT 1', [campaign.strategy_version_id, campaign.strategy_id, userId])
+    : await db.query('SELECT id, version_number, config FROM strategy_versions WHERE strategy_id=$1 AND user_id=$2 AND version_number=$3 LIMIT 1', [campaign.strategy_id, userId, Number(campaign.strategy_version || strategyBase.version || 1)]);
   const pinned = versionQ.rows[0];
   if (!pinned) return res.status(409).json({ error: 'STRATEGY_VERSION_NOT_FOUND', version: Number(campaign.strategy_version || strategyBase.version || 1) });
   const versionConfig = pinned.config && typeof pinned.config === 'object' ? pinned.config : {};

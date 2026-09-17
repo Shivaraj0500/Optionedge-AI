@@ -50,52 +50,70 @@ async function refreshBrokerStatus(){try{const d=await req('/broker-status');$('
 async function loadIndicators(){try{const p=payload();const d=await req('/upstox-indicators?underlying='+encodeURIComponent(p.underlying)+'&timeframe='+encodeURIComponent(p.timeframe)+'&adx_period='+p.adx_period+'&atr_period='+p.atr_period+'&atr_multiplier='+p.atr_multiplier);const i=d.indicators||{};$('liveAdx').textContent=fmt(i.adx);$('livePlusDi').textContent=fmt(i.plus_di);$('liveMinusDi').textContent=fmt(i.minus_di);$('liveAtr').textContent=fmt(i.atr);$('liveUpper').textContent=fmt(i.atr_upper);$('liveLower').textContent=fmt(i.atr_lower);$('liveAdxRule').textContent='Threshold '+fmt(p.adx_threshold);$('liveAtrRule').textContent='Period '+p.atr_period+' · × '+fmt(p.atr_multiplier);const ok=Number(i.adx)<p.adx_threshold&&(!p.regime_rule.adx_below_plus_di||Number(i.adx)<Number(i.plus_di))&&(!p.regime_rule.adx_below_minus_di||Number(i.adx)<Number(i.minus_di));$('liveState').textContent=ok?'REGIME PASS':'REGIME BLOCKED';$('liveState').className='live-state '+(ok?'good':'warn');$('liveMeta').textContent=`${d.underlying} · ${d.timeframe} · completed ${new Date(d.completed_candle).toLocaleString('en-IN',{timeZone:'Asia/Kolkata'})} · spot ${fmt(i.spot)} · source ${d.source}`}catch(e){$('liveState').textContent='WAITING';$('liveState').className='live-state';$('liveMeta').textContent='Indicator feed unavailable: '+e.message;['liveAdx','livePlusDi','liveMinusDi','liveAtr','liveUpper','liveLower'].forEach(id=>$(id).textContent='—')}}
 async function loadDashboard(){try{$('refreshDashboard').disabled=true;$('refreshDashboard').textContent='Refreshing…';const tf=$('dashTimeframe').value;const d=await req('/dashboard?timeframe='+encodeURIComponent(tf));const setIndex=(prefix,x)=>{const ok=!x.error;$(prefix+'Price').textContent=ok?fmt(x.price):'—';$(prefix+'Adx').textContent=ok?fmt(x.adx):'—';$(prefix+'Plus').textContent=ok?fmt(x.plus_di):'—';$(prefix+'Minus').textContent=ok?fmt(x.minus_di):'—';$(prefix+'Atr').textContent=ok?fmt(x.atr):'—';$(prefix+'Meta').textContent=ok?`UPSTOX · ${tf} · completed ${historyDate(x.completed_candle)}`:`UPSTOX · ${x.error||'DATA_UNAVAILABLE'}`;$(prefix+'State').textContent=ok?'VERIFIED':'UNAVAILABLE';$(prefix+'State').className='live-state '+(ok?'good':'warn')};setIndex('dashNifty',d.indices?.nifty||{});setIndex('dashBank',d.indices?.nifty_bank||{});const r=d.running||{};$('dashCampaigns').textContent=fmt(r.campaigns,0);$('dashLegs').textContent=fmt(r.legs,0);$('dashPnl').textContent=formatPnl(r.pnl);$('dashPnl').className=Number(r.pnl)>=0?'pnl-pos':'pnl-neg';$('dashUpdated').textContent=historyDate(d.as_of);const rows=r.trades||[];$('dashTrades').innerHTML=rows.length?`<table class="dash-table"><thead><tr><th>Underlying</th><th>Role</th><th>Side</th><th>Type</th><th>Strike</th><th>Qty</th><th>Entry</th><th>Current</th><th>P&amp;L</th><th>Entry Time</th></tr></thead><tbody>${rows.map(t=>`<tr data-live-key="${esc(t.instrument_key||'')}"><td>${esc(t.underlying)}</td><td>${esc(t.role)}</td><td>${esc(t.side)}</td><td>${esc(t.option_type)}</td><td>${fmt(t.strike)}</td><td>${fmt(t.quantity,0)}</td><td>${fmt(t.entry_price)}</td><td class="live-current">${fmt(t.current_price)}</td><td class="live-pnl ${Number(t.pnl)>=0?'pnl-pos':'pnl-neg'}">${formatPnl(t.pnl)}</td><td>${historyDate(t.entry_at)}</td></tr>`).join('')}</tbody></table>`:'<div class="box">No running paper trades. Start a paper campaign after saving a validated strategy.</div>';if(window.optionEdgeLiveFeed) window.optionEdgeLiveFeed.subscribe(rows.map(t=>t.instrument_key).filter(Boolean));$('dashMessage').textContent=`Dashboard source: Upstox V3 live feed + OptionEdge AI paper ledger · ${historyDate(d.as_of)}. Index prices and open-option marks use live LTPC ticks; ADX/DMI use completed ${tf} candles. P&L is recalculated from live option LTP.`}catch(e){$('dashMessage').textContent='Dashboard unavailable: '+e.message+' · No values were fabricated.';$('dashTrades').innerHTML='<div class="box">Unable to load running trades.</div>'}finally{$('refreshDashboard').disabled=false;$('refreshDashboard').textContent='Refresh dashboard'}}
 let dashboardLiveStarted=false;
+const dashboardTickState={quotes:new Map(),trades:new Map()};
+function applyDashboardTotals(){
+  let total=0, open=0;
+  dashboardTickState.trades.forEach(t=>{ if(Number.isFinite(t.pnl)){total+=t.pnl;open++;} });
+  if(open){$('dashPnl').textContent=formatPnl(total);$('dashPnl').className=total>=0?'pnl-pos':'pnl-neg';}
+}
+function updateDashboardTradeTick(t){
+  const row=document.querySelector(`tr[data-live-key="${CSS.escape(t.instrument_key||'')}"]`);
+  if(!row) return;
+  const live=Number(t.ltp); if(!Number.isFinite(live)) return;
+  const entry=Number(row.children[6]?.textContent?.replaceAll(',',''));
+  const qty=Number(row.children[5]?.textContent?.replaceAll(',',''));
+  const side=String(row.children[2]?.textContent||'');
+  const pnl=(side==='BUY'?1:-1)*(live-entry)*qty;
+  const current=row.querySelector('.live-current');
+  const pnlEl=row.querySelector('.live-pnl');
+  if(current) current.textContent=fmt(live,2);
+  if(pnlEl){pnlEl.textContent=formatPnl(pnl);pnlEl.className='live-pnl '+(pnl>=0?'pnl-pos':'pnl-neg');}
+  dashboardTickState.trades.set(t.instrument_key,{pnl,price:live});
+}
 function connectDashboardLiveFeed(){
   if(dashboardLiveStarted || !window.optionEdgeLiveFeed) return;
   dashboardLiveStarted=true;
   window.optionEdgeLiveFeed.connect((ticks)=>{
     for(const t of ticks){
-      const rows=document.querySelectorAll('tr[data-live-key]');
-      rows.forEach(row=>{
-        if(row.dataset.liveKey===t.instrument_key){
-          const current=row.querySelector('.live-current');
-          const pnl=row.querySelector('.live-pnl');
-          const entry=Number(row.children[6]?.textContent?.replaceAll(',',''));
-          const qty=Number(row.children[5]?.textContent?.replaceAll(',',''));
-          const side=String(row.children[2]?.textContent||'');
-          const live=Number(t.ltp);
-          if(current && Number.isFinite(live)) current.textContent=fmt(live,2);
-          if(pnl && Number.isFinite(live)&&Number.isFinite(entry)&&Number.isFinite(qty)){
-            const value=(side==='BUY'?1:-1)*(live-entry)*qty;
-            pnl.textContent=formatPnl(value);
-            pnl.className='live-pnl '+(value>=0?'pnl-pos':'pnl-neg');
-          }
-        }
-      });
+      const live=Number(t.ltp); if(!Number.isFinite(live)) continue;
+      dashboardTickState.quotes.set(t.instrument_key,live);
+      updateDashboardTradeTick(t);
       if(t.instrument_key==='NSE_INDEX|Nifty 50'){
-        $('dashNiftyPrice').textContent=fmt(t.ltp,2);
+        $('dashNiftyPrice').textContent=fmt(live,2);
         $('dashNiftyState').textContent='LIVE TICK';
         $('dashNiftyState').className='live-state good';
         $('dashNiftyMeta').textContent='UPSTOX · LIVE MARKET FEED V3 · '+new Date().toLocaleTimeString('en-IN',{timeZone:'Asia/Kolkata'});
       }
       if(t.instrument_key==='NSE_INDEX|Nifty Bank'){
-        $('dashBankPrice').textContent=fmt(t.ltp,2);
+        $('dashBankPrice').textContent=fmt(live,2);
         $('dashBankState').textContent='LIVE TICK';
         $('dashBankState').className='live-state good';
         $('dashBankMeta').textContent='UPSTOX · LIVE MARKET FEED V3 · '+new Date().toLocaleTimeString('en-IN',{timeZone:'Asia/Kolkata'});
       }
     }
+    applyDashboardTotals();
   },(state)=>{
-    if(state==='LIVE'){
-      $('dashMessage').textContent='NIFTY 50 and BANK NIFTY prices are now coming directly from the Upstox V3 LTPC WebSocket. The price cards update on broker ticks, not on a timer.';
-    } else if(state==='CONNECTING'){
-      $('dashMessage').textContent='Connecting to the Upstox V3 live market feed…';
-    } else if(state==='ERROR' || state==='DISCONNECTED'){
-      $('dashMessage').textContent='Live tick feed disconnected. Reconnecting automatically; no fabricated price is shown.';
-    }
+    if(state==='LIVE') $('dashMessage').textContent='Live Upstox V3 tick feed connected. Index prices and open option marks update on broker ticks; candle indicators refresh separately.';
+    else if(state==='CONNECTING') $('dashMessage').textContent='Connecting to the Upstox V3 live market feed…';
+    else if(state==='ERROR' || state==='DISCONNECTED') $('dashMessage').textContent='Live tick feed disconnected. Reconnecting automatically; no fabricated price is shown.';
   });
 }
-async function refreshDashboardLive(){try{const d=await req('/dashboard-live');const setPrice=(id,value)=>{if(value!=null)$(id).textContent=fmt(value)};setPrice('dashNiftyPrice',d.index_prices?.nifty);setPrice('dashBankPrice',d.index_prices?.nifty_bank);const r=d.running||{};$('dashCampaigns').textContent=fmt(r.campaigns,0);$('dashLegs').textContent=fmt(r.legs,0);$('dashPnl').textContent=formatPnl(r.pnl);$('dashPnl').className=Number(r.pnl)>=0?'pnl-pos':'pnl-neg';$('dashUpdated').textContent=historyDate(d.as_of);const rows=r.trades||[];const cells=document.querySelectorAll('#dashTrades tbody tr');rows.forEach((t,i)=>{const tr=cells[i];if(!tr)return;const td=tr.children;if(td[7])td[7].textContent=fmt(t.current_price);if(td[8]){td[8].textContent=formatPnl(t.pnl);td[8].className=Number(t.pnl)>=0?'pnl-pos':'pnl-neg'}})}catch(e){/* Keep the last verified dashboard values on transient quote errors. */}}$('refreshDashboard').onclick=loadDashboard;$('dashTimeframe').onchange=loadDashboard;
+async function refreshDashboardLive(){
+  try{
+    const d=await req('/dashboard-live');
+    const setPrice=(id,value)=>{if(value!=null)$(id).textContent=fmt(value)};
+    setPrice('dashNiftyPrice',d.index_prices?.nifty); setPrice('dashBankPrice',d.index_prices?.nifty_bank);
+    const r=d.running||{}; $('dashCampaigns').textContent=fmt(r.campaigns,0); $('dashLegs').textContent=fmt(r.legs,0);
+    const rows=r.trades||[]; rows.forEach(t=>dashboardTickState.trades.set(t.instrument_key,{pnl:Number(t.pnl||0),price:Number(t.current_price)}));
+    if(!rows.length){$('dashPnl').textContent=formatPnl(r.pnl);$('dashPnl').className=Number(r.pnl)>=0?'pnl-pos':'pnl-neg';}
+    else applyDashboardTotals();
+    $('dashUpdated').textContent=historyDate(d.as_of);
+    const cells=document.querySelectorAll('#dashTrades tbody tr');
+    rows.forEach((t,i)=>{const tr=cells[i];if(!tr)return;const td=tr.children;if(td[7])td[7].textContent=fmt(t.current_price);if(td[8]){td[8].textContent=formatPnl(t.pnl);td[8].className=Number(t.pnl)>=0?'pnl-pos':'pnl-neg';}});
+    if(rows.length && window.optionEdgeLiveFeed) window.optionEdgeLiveFeed.subscribe(rows.map(t=>t.instrument_key).filter(Boolean));
+  }catch(e){/* Keep last verified values on transient API errors. */}
+}
+$('refreshDashboard').onclick=loadDashboard;$('dashTimeframe').onchange=loadDashboard;
 $('save').onclick=async()=>{try{$('strategyMsg').textContent='Saving new version…';const d=await req('/strategies',{method:'POST',body:JSON.stringify(payload())});strategy=d.strategy;$('validate').disabled=false;$('strategyMsg').textContent=`Saved ${strategy.name} · version ${d.version}`;$('g2').textContent='SAVED'}catch(e){$('strategyMsg').textContent=e.message}};$('validate').onclick=async()=>{try{const d=await req('/strategy-validate',{method:'POST',body:JSON.stringify({strategy_id:strategy.id})});$('strategyMsg').textContent=`${d.status}: ${d.errors?.length||0} errors · ${d.warnings?.length||0} warnings`;$('g2').textContent=d.valid?'PASS':'BLOCKED'}catch(e){$('strategyMsg').textContent=e.message}};$('reset').onclick=()=>location.reload();
 $('refreshIndicators').onclick=loadIndicators;$('connect').onclick=()=>location.href=API+'/upstox-connect';$('refreshBrokerAccount').onclick=async()=>{const b=await refreshBrokerStatus();if(b?.connected){try{const d=await req('/upstox-account-snapshot');$('brokerMarket').textContent=d.market?.status||'—';$('brokerPositions').textContent=d.positions?.count??0;$('brokerOrders').textContent=d.orders?.count??0;$('brokerAccount').textContent='Verified Upstox account snapshot loaded.'}catch(e){$('brokerAccount').textContent=e.message}}};
 async function loadPaperRecovery(){try{const d=await req('/paper-recovery');$('paperRecoveryState').textContent=d.recovery_required?'RECOVERY REQUIRED':(d.status||'HEALTHY');return d}catch(e){return null}}async function refreshPaperState(runCycle=true){try{const recovery=await loadPaperRecovery();let d=await req('/paper-engine');if(recovery?.recovery_required&&d?.campaign?.status==='RUNNING'){try{d=await req('/paper-engine',{method:'POST',body:JSON.stringify({action:'RECOVER',campaign_id:d.campaign.id})});$('paperMsg').textContent='Paper state reconciled against the current Upstox option chain.'}catch(re){$('paperMsg').textContent='Recovery still required: '+re.message}}if(runCycle&&d?.campaign?.status==='RUNNING'&&!d?.campaign?.recovery_required)d=await req('/paper-engine',{method:'POST',body:JSON.stringify({action:'CYCLE',campaign_id:d.campaign.id})});const c=d?.campaign;$('paperCampaignState').textContent=c?.status||'NOT RUNNING';$('paperStrategyState').textContent=c?.strategy_id?(strategy?.name||c.strategy_id.slice(0,8)+'…'):'Not selected';$('paperEngineState').textContent=c?.last_status||'IDLE';$('paperTotalPnl').textContent=formatPnl(c?.total_pnl);const ind=d?.decisions?.[0]?.indicators||{};$('paperSpot').textContent=fmt(ind.spot);$('paperAdx').textContent=fmt(ind.adx);$('paperAtr').textContent=fmt(ind.atr);$('paperUpper').textContent=fmt(ind.atr_upper);$('paperLower').textContent=fmt(ind.atr_lower);const open=(d?.legs||[]).filter(x=>x.status==='OPEN');$('paperPositions').textContent=open.length?`Active simulated structure · ${open.length} legs · P&L ${formatPnl(open.reduce((s,x)=>s+Number(x.pnl||0),0))}`:'No active paper legs.';return d}catch(e){$('paperEngineState').textContent='ERROR';$('paperMsg').textContent='Paper engine cycle failed: '+e.message;return null}}
@@ -114,7 +132,7 @@ $('refreshBacktests').onclick=async()=>{try{const d=await req('/backtest');$('bt
 // Paper trade history is the source of truth for the dashboard's running-trade table.
 async function loadHistory(){try{const d=await req('/paper-trade-history?status='+encodeURIComponent($('historyStatus').value)+'&underlying='+encodeURIComponent($('historyUnderlying').value));const s=d.summary||{};$('historyTotal').textContent=fmt(s.total_legs,0);$('historyClosed').textContent=fmt(s.closed_legs,0);$('historyOpen').textContent=fmt(s.open_legs,0);$('historyCampaigns').textContent=fmt(s.campaigns,0);$('historyRealized').textContent=formatPnl(s.realized_pnl);$('historyOpenPnl').textContent=formatPnl(s.open_pnl);$('historyTotalPnl').textContent=formatPnl(s.total_pnl);$('historyMsg').textContent=`${d.trades?.length||0} paper ledger legs loaded.`;const rows=d.trades||[];$('historyWrap').innerHTML=rows.length?`<table class="dash-table"><thead><tr><th>Time</th><th>Underlying</th><th>Side</th><th>Type</th><th>Role</th><th>Strike</th><th>Qty</th><th>Entry</th><th>Exit</th><th>Current</th><th>P&L</th><th>Status</th></tr></thead><tbody>${rows.map(t=>`<tr><td>${historyDate(t.entry_at)}</td><td>${esc(t.underlying)}</td><td>${esc(t.side)}</td><td>${esc(t.option_type)}</td><td>${esc(t.role)}</td><td>${fmt(t.strike)}</td><td>${fmt(t.quantity,0)}</td><td>${fmt(t.entry_price)}</td><td>${fmt(t.exit_price)}</td><td>${fmt(t.current_price)}</td><td class="${Number(t.pnl)>=0?'pnl-pos':'pnl-neg'}">${formatPnl(t.pnl)}</td><td>${esc(t.status)}</td></tr>`).join('')}</tbody></table>`:'<div class="box">No trades match the selected filters.</div>'}catch(e){$('historyMsg').textContent='Trade history unavailable: '+e.message}}$('refreshHistory').onclick=loadHistory;$('historyStatus').onchange=loadHistory;$('historyUnderlying').onchange=loadHistory;
 
-(async()=>{renderLegs();const signedIn=await session();if(signedIn){await refreshBrokerStatus();await loadDashboard();connectDashboardLiveFeed();await loadRisk();await refreshPaperState(false);setInterval(async()=>{if(document.visibilityState==='visible'){await loadDashboard();await refreshPaperState(true)}},30000);setInterval(async()=>{if(document.visibilityState==='visible'&&!$('tab-dashboard').classList.contains('hidden'))await refreshDashboardLive()},5000)}})();
+(async()=>{renderLegs();const signedIn=await session();if(signedIn){await refreshBrokerStatus();await loadDashboard();connectDashboardLiveFeed();await loadRisk();await refreshPaperState(false);setInterval(async()=>{if(document.visibilityState==='visible'){await loadDashboard();await loadIndicators();await refreshPaperState(true)}},15000);setInterval(async()=>{if(document.visibilityState==='visible'&&!$('tab-dashboard').classList.contains('hidden'))await refreshDashboardLive()},2000)}})();
 </script>
 <script>
 (function(){

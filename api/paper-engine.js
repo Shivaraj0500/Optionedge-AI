@@ -1,4 +1,5 @@
 import { db } from 'hatchable';
+import { INTRADAY_SQUARE_OFF, minutesOf as policyMinutesOf } from 'lib/trading-policy.js';
 
 export const access = 'user';
 export const methods = ['GET', 'POST'];
@@ -442,7 +443,7 @@ async function cycle(req, res, campaign) {
   // fresh market data before square-off/management.
   const currentMinutes = nowIstMinutes();
   const start = minutesOf(strategyObj.start_time || '09:45');
-  const squareOff = minutesOf(strategyObj.square_off || '15:15');
+  const squareOff = policyMinutesOf(INTRADAY_SQUARE_OFF);
   const openQ = await db.query('SELECT * FROM paper_campaign_legs WHERE user_id=$1 AND campaign_id=$2 AND status=$3 ORDER BY execution_rank', [userId, campaign.id, 'OPEN']);
 
   if (currentMinutes < start && !openQ.rows.length) {
@@ -570,7 +571,7 @@ async function reconcileRecovery(req, res, campaign) {
   }
   const nowMinutes = nowIstMinutes();
   const start = minutesOf(strategy.start_time || '09:45');
-  const squareOff = minutesOf(strategy.square_off || '15:15');
+  const squareOff = policyMinutesOf(INTRADAY_SQUARE_OFF);
   if (nowMinutes < start || nowMinutes >= squareOff) return res.status(409).json({ ...(await state(userId, campaign.id)), error: 'RECOVERY_MARKET_CLOSED', broker_orders_sent: false });
   const connection = await broker(req);
   const ctx = await marketContext(connection, strategy, req);

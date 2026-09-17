@@ -1,4 +1,5 @@
 import { db } from 'hatchable';
+import { INTRADAY_SQUARE_OFF, minutesOf } from 'lib/trading-policy.js';
 
 export const access = 'user';
 export const methods = ['POST'];
@@ -37,10 +38,11 @@ export default async function (req, res) {
   if (!ALLOWED_CANDLES.includes(s.candle_type)) errors.push('Unsupported candle type');
   if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(s.start_time)) errors.push('Invalid start time');
   if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(s.square_off)) errors.push('Invalid square-off time');
+  else if (minutesOf(s.square_off) > minutesOf(INTRADAY_SQUARE_OFF)) errors.push(`Intraday square-off cannot be later than ${INTRADAY_SQUARE_OFF} IST`);
   if (Number(s.atr_multiplier) <= 0) errors.push('ATR multiplier must be positive');
   if (Number(s.adx_period) < 2) errors.push('ADX period must be >= 2');
   if (Number(s.atr_period) < 2) errors.push('ATR period must be >= 2');
-  if (s.overnight_exposure) warnings.push('Overnight exposure is enabled; default product guardrails prefer disabled overnight exposure.');
+  if (s.overnight_exposure) errors.push('Overnight exposure is disabled by the global intraday policy. All intraday positions must be closed by 15:15 IST.');
   if (legs.length < 2) warnings.push('Strategy has fewer than two legs; this is allowed for custom structures but verify intent.');
   if (!legs.some(l => l.option_type === 'CE')) warnings.push('No CE leg configured.');
   if (!legs.some(l => l.option_type === 'PE')) warnings.push('No PE leg configured.');

@@ -1,10 +1,19 @@
 import { db, scheduler } from 'hatchable';
 import { runLiveCycle } from 'lib/live-engine-core.js';
+import { INTRADAY_SQUARE_OFF, minutesOf } from 'lib/trading-policy.js';
 
 export const access = 'scheduler';
 export const methods = ['POST'];
 
 const num = (v, d = 0) => { const x = Number(v); return Number.isFinite(x) ? x : d; };
+
+async function armNextDailySquareOff(userId){
+  const ist=new Date(Date.now()+330*60*1000);
+  const cutoff=new Date(Date.UTC(ist.getUTCFullYear(),ist.getUTCMonth(),ist.getUTCDate(),9,45,0,0));
+  cutoff.setUTCDate(cutoff.getUTCDate()+1);
+  while(cutoff.getUTCDay()===0||cutoff.getUTCDay()===6) cutoff.setUTCDate(cutoff.getUTCDate()+1);
+  await scheduler.at(cutoff,'/api/live-supervisor',{payload:{user_id:userId},name:'live-squareoff-'+userId});
+}
 
 async function broker(userId) {
   const q = await db.query('SELECT access_token,status,expires_at FROM broker_connections WHERE user_id=$1 LIMIT 1',[userId]);
@@ -132,7 +141,10 @@ export default async function(req,res){
       const cfg=await db.query('SELECT armed,enabled FROM live_execution_configs WHERE user_id=$1 LIMIT 1',[userId]);
       const br=await broker(userId);
       if(cfg.rows[0]?.armed && cfg.rows[0]?.enabled!==false && br){
-        await scheduler.at(new Date(Date.now()+5*60*1000),'/api/live-supervisor',{payload:{user_id:userId},name:'live-supervisor-'+userId});
+        const istNow=new Date(Date.now()+330*60*1000);
+        const nowMinutes=istNow.getUTCHours()*60+istNow.getUTCMinutes();
+        if(nowMinutes>=minutesOf(INTRADAY_SQUARE_OFF)) await armNextDailySquareOff(userId);
+        else await scheduler.at(new Date(Date.now()+5*60*1000),'/api/live-supervisor',{payload:{user_id:userId},name:'live-supervisor-'+userId});
       }
     }
   }

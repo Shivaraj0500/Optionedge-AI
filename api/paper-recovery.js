@@ -1,4 +1,5 @@
 import { db } from 'hatchable';
+import { INTRADAY_SQUARE_OFF, minutesOf as policyMinutesOf } from 'lib/trading-policy.js';
 
 export const access = 'user';
 export const methods = ['GET'];
@@ -31,7 +32,7 @@ export default async function(req, res) {
   const strategy = strategyQ.rows[0] || {};
   const nowMinutes = nowIstMinutes();
   const startMinutes = minutesOf(strategy.start_time || '09:45');
-  const squareOffMinutes = minutesOf(strategy.square_off || '15:15');
+  const squareOffMinutes = policyMinutesOf(INTRADAY_SQUARE_OFF);
   const withinTradingWindow = nowMinutes >= startMinutes && nowMinutes < squareOffMinutes;
   // A persistent campaign is intentionally idle outside its trading window.
   // Do not classify that idle period as stale/recovery-required when there are
@@ -54,7 +55,7 @@ export default async function(req, res) {
     const strategy = strategyQ.rows[0] || {};
     const nowMinutes = nowIstMinutes();
     const startMinutes = minutesOf(strategy.start_time || '09:45');
-    const squareOffMinutes = minutesOf(strategy.square_off || '15:15');
+    const squareOffMinutes = policyMinutesOf(INTRADAY_SQUARE_OFF);
     const outsideWindow = nowMinutes < startMinutes || nowMinutes >= squareOffMinutes;
     if (outsideWindow) {
       await db.query("UPDATE paper_campaigns SET status='CLOSED', closed_at=now(), last_status='MARKET_CLOSED', last_reason='OUTSIDE_TRADING_WINDOW', cycle_lock_until=null, recovery_required=false, updated_at=now() WHERE id=$1 AND user_id=$2 AND status='RUNNING'", [campaign.id, userId]);

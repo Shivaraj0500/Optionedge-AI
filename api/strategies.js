@@ -1,4 +1,5 @@
 import { db, auth } from 'hatchable';
+import { INTRADAY_SQUARE_OFF } from 'lib/trading-policy.js';
 
 export const access = 'user';
 export const methods = ['GET', 'POST', 'PUT'];
@@ -58,7 +59,9 @@ function normalizeConfig(body) {
   const candleType = ALLOWED_CANDLES.includes(body.candle_type) ? body.candle_type : 'OHLC';
   const underlying = ALLOWED_UNDERLYINGS.includes(body.underlying) ? body.underlying : 'NIFTY 50';
   const optionExpiry = ALLOWED_EXPIRIES.includes(body.option_expiry) ? body.option_expiry : 'current_week';
-  const squareOff = /^([01]\d|2[0-3]):[0-5]\d$/.test(String(body.square_off || '')) ? String(body.square_off) : '15:15';
+  // Global intraday policy: every intraday strategy is forced to square off at 15:15 IST.
+  // A strategy cannot extend this cutoff or enable overnight exposure.
+  const squareOff = INTRADAY_SQUARE_OFF;
   const startTime = /^([01]\d|2[0-3]):[0-5]\d$/.test(String(body.start_time || '')) ? String(body.start_time) : '09:45';
   const legs = Array.isArray(body.legs) ? body.legs.map(cleanLeg).filter(l => l.enabled) : [];
   if (legs.length === 0) {
@@ -73,7 +76,7 @@ function normalizeConfig(body) {
     candle_type: candleType,
     start_time: startTime,
     square_off: squareOff,
-    overnight_exposure: body.overnight_exposure === true,
+    overnight_exposure: false,
     adx_period: clampInt(body.adx_period, 2, 200, 14),
     adx_threshold: clampNum(body.adx_threshold, 1, 100, 22),
     atr_period: clampInt(body.atr_period, 2, 200, 14),

@@ -1,4 +1,5 @@
 import { db } from 'hatchable';
+import { INTRADAY_SQUARE_OFF, minutesOf } from 'lib/trading-policy.js';
 
 export const access = 'user';
 export const methods = ['GET'];
@@ -19,7 +20,7 @@ function marketSession(now = new Date()) {
   const ist = new Date(now.getTime() + 330 * 60 * 1000);
   const day = ist.getUTCDay();
   const minutes = ist.getUTCHours() * 60 + ist.getUTCMinutes();
-  const open = day >= 1 && day <= 5 && minutes >= 9 * 60 + 15 && minutes < 15 * 60 + 40;
+  const open = day >= 1 && day <= 5 && minutes >= 9 * 60 + 15 && minutes < minutesOf(INTRADAY_SQUARE_OFF);
   return { open, status: open ? 'OPEN' : (day === 0 || day === 6 ? 'WEEKEND' : minutes < 9 * 60 + 15 ? 'PRE_OPEN' : 'CLOSED'), checked_at: now.toISOString() };
 }
 

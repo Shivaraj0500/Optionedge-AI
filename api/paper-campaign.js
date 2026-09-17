@@ -1,4 +1,5 @@
 import { db } from 'hatchable';
+import { INTRADAY_SQUARE_OFF, minutesOf as policyMinutesOf } from 'lib/trading-policy.js';
 
 export const access = 'user';
 export const methods = ['GET', 'POST'];
@@ -37,7 +38,7 @@ export default async function(req, res) {
   // normal market-closed condition, not a recovery incident. Do this preflight
   // before creating a RUNNING campaign or fetching broker market data.
   const startMinutes = minutesOf(strategy.start_time || '09:45');
-  const squareOffMinutes = minutesOf(strategy.square_off || '15:15');
+  const squareOffMinutes = policyMinutesOf(INTRADAY_SQUARE_OFF);
   const nowMinutes = nowIstMinutes();
   const withinWindow = nowMinutes >= startMinutes && nowMinutes < squareOffMinutes;
   if (!withinWindow) {

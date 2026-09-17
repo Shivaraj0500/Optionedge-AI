@@ -42,6 +42,11 @@ export default async function(req,res){
     if(!groups.has(r.strategy_id)) groups.set(r.strategy_id,{id:r.strategy_id,name:r.strategy_name,signal_model:r.signal_model||'LEGACY_ADX_RANGE',strategy_type:modelLabel(r.signal_model||'LEGACY_ADX_RANGE'),underlying:r.underlying,timeframe:r.timeframe,enabled:r.strategy_enabled,versions:[]});
     groups.get(r.strategy_id).versions.push({id:r.version_id,version:r.version_number,status:r.status,created_at:r.version_created_at,summary:summarize(r)});
   }
-  const strategies=[...groups.values()];
+  // Execution catalog is intentionally stricter than the Strategy Library:
+  // only validated/active versions are selectable for Paper or Live execution.
+  for(const s of groups.values()){
+    s.versions=s.versions.filter(v=>['VALIDATED','ACTIVE'].includes(String(v.status).toUpperCase()));
+  }
+  const strategies=[...groups.values()].filter(s=>s.versions.length>0);
   return res.json({strategies,defaults:{legacy_label:'Option Selling',transition_label:'ST + EMA + RSI Transition'}});
 }

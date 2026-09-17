@@ -1,0 +1,1 @@
+ALTER TABLE strategy_configs ADD COLUMN IF NOT EXISTS signal_model text NOT NULL DEFAULT 'LEGACY_ADX_RANGE';

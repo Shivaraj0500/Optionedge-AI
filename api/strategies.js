@@ -11,6 +11,7 @@ const ALLOWED_SIDES = ['BUY', 'SELL'];
 const ALLOWED_TYPES = ['CE', 'PE'];
 const ALLOWED_SELECTION = ['ATM', 'STRIKE_OFFSET', 'PREMIUM', 'DELTA', 'CUSTOM_STRIKE'];
 const ALLOWED_EXPIRIES = ['current_week', 'next_week', 'far_week', 'current_month', 'next_month', 'far_month'];
+const ALLOWED_SIGNAL_MODELS = ['LEGACY_ADX_RANGE', 'ST_EMA_RSI_TRANSITION'];
 
 function clampInt(v, min, max, fallback) {
   const n = Number.parseInt(v, 10);
@@ -82,6 +83,15 @@ function normalizeConfig(body) {
     atr_period: clampInt(body.atr_period, 2, 200, 14),
     atr_multiplier: clampNum(body.atr_multiplier, 0.1, 20, 2),
     confirmation_candles: clampInt(body.confirmation_candles, 0, 10, 1),
+    signal_model: ALLOWED_SIGNAL_MODELS.includes(body.signal_model) ? body.signal_model : 'LEGACY_ADX_RANGE',
+    signal_config: {
+      supertrend_period: clampInt(body.signal_config?.supertrend_period, 2, 200, 10),
+      supertrend_multiplier: clampNum(body.signal_config?.supertrend_multiplier, 0.1, 20, 2),
+      ema_period: clampInt(body.signal_config?.ema_period, 2, 500, 50),
+      rsi_period: clampInt(body.signal_config?.rsi_period, 2, 200, 14),
+      rsi_long_threshold: clampNum(body.signal_config?.rsi_long_threshold, 0, 100, 60),
+      rsi_short_threshold: clampNum(body.signal_config?.rsi_short_threshold, 0, 100, 40),
+    },
     regime_rule: {
       mode: String(body.regime_rule?.mode || 'ADX_RANGE'),
       adx_less_than: clampNum(body.regime_rule?.adx_less_than, 1, 100, 22),
@@ -116,6 +126,8 @@ function asStrategy(row) {
     confirmation_candles: row.confirmation_candles,
     regime_rule: row.regime_rule,
     roll_mode: row.roll_mode,
+    signal_model: row.signal_model || 'LEGACY_ADX_RANGE',
+    signal_config: row.signal_config || { supertrend_period: 10, supertrend_multiplier: 2, ema_period: 50, rsi_period: 14, rsi_long_threshold: 60, rsi_short_threshold: 40 },
     legs: config,
     margin_config: row.margin_config,
     version: row.version,
@@ -150,13 +162,13 @@ export default async function (req, res) {
       `INSERT INTO strategy_configs
         (user_id, name, underlying, option_expiry, timeframe, candle_type, start_time, square_off, overnight_exposure,
          adx_period, adx_threshold, atr_period, atr_multiplier, confirmation_candles, regime_rule,
-         roll_mode, leg_config, margin_config, version, enabled)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,1,false)
+         roll_mode, signal_model, signal_config, leg_config, margin_config, version, enabled)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,1,false)
        RETURNING *`,
       [user.id, config.name, config.underlying, config.option_expiry, config.timeframe, config.candle_type, config.start_time,
        config.square_off, config.overnight_exposure, config.adx_period, config.adx_threshold,
        config.atr_period, config.atr_multiplier, config.confirmation_candles, JSON.stringify(config.regime_rule),
-       config.roll_mode, JSON.stringify(config.legs), JSON.stringify(config.margin_config)]
+       config.roll_mode, config.signal_model, JSON.stringify(config.signal_config), JSON.stringify(config.legs), JSON.stringify(config.margin_config)]
     );
     const strategy = inserted.rows[0];
     await db.transaction([
@@ -185,13 +197,13 @@ export default async function (req, res) {
       `UPDATE strategy_configs
        SET name=$1, underlying=$2, option_expiry=$3, timeframe=$4, candle_type=$5, start_time=$6, square_off=$7,
            overnight_exposure=$8, adx_period=$9, adx_threshold=$10, atr_period=$11, atr_multiplier=$12,
-           confirmation_candles=$13, regime_rule=$14, roll_mode=$15, leg_config=$16, margin_config=$17,
-           version=$18, updated_at=now()
-       WHERE id=$19 AND user_id=$20
+           confirmation_candles=$13, regime_rule=$14, roll_mode=$15, signal_model=$16, signal_config=$17, leg_config=$18, margin_config=$19,
+           version=$20, updated_at=now()
+       WHERE id=$21 AND user_id=$22
        RETURNING *`,
       [config.name, config.underlying, config.option_expiry, config.timeframe, config.candle_type, config.start_time, config.square_off,
        config.overnight_exposure, config.adx_period, config.adx_threshold, config.atr_period, config.atr_multiplier,
-       config.confirmation_candles, JSON.stringify(config.regime_rule), config.roll_mode, JSON.stringify(config.legs),
+       config.confirmation_candles, JSON.stringify(config.regime_rule), config.roll_mode, config.signal_model, JSON.stringify(config.signal_config), JSON.stringify(config.legs),
        JSON.stringify(config.margin_config), nextVersion, strategyId, user.id]
     );
     await db.transaction([

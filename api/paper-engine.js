@@ -1,5 +1,6 @@
 import { db } from 'hatchable';
 import { INTRADAY_SQUARE_OFF, minutesOf as policyMinutesOf } from 'lib/trading-policy.js';
+import { evaluateTransition } from 'lib/transition-signal.js';
 
 export const access = 'user';
 export const methods = ['GET', 'POST'];
@@ -145,6 +146,8 @@ async function marketContext(connection, strategy, req) {
   const basis = strategy.candle_type === 'HEIKIN_ASHI' ? heikinAshi(completedCandles) : completedCandles;
   const indicator = calculateIndicators(basis, Number(strategy.adx_period), Number(strategy.atr_period));
   if (!indicator) throw new Error('INSUFFICIENT_CANDLES');
+  const transition = strategy.signal_model === 'ST_EMA_RSI_TRANSITION' ? evaluateTransition(basis, strategy.signal_config || {}) : null;
+  if (transition && !transition.ready) throw new Error(transition.reason || 'SIGNAL_INDICATORS_UNAVAILABLE');
   const lastRaw = completedCandles[completedCandles.length - 1];
   if (!lastRaw?.timestamp || !Number.isFinite(lastRaw.close)) throw new Error('MARKET_CONTEXT_INVALID');
   const candleAgeSeconds = Math.max(0, (now - new Date(lastRaw.timestamp).getTime()) / 1000);
@@ -157,7 +160,7 @@ async function marketContext(connection, strategy, req) {
   const spot = lastRaw.close;
   const upper = spot + Number(strategy.atr_multiplier) * indicator.atr;
   const lower = spot - Number(strategy.atr_multiplier) * indicator.atr;
-  return { instrumentKey, minutes, completedCandles, indicator, spot, upper, lower, lastCandle: lastRaw, candleAgeSeconds, freshnessLimit };
+  return { instrumentKey, minutes, completedCandles, indicator, transition, spot, upper, lower, lastCandle: lastRaw, candleAgeSeconds, freshnessLimit };
 }
 
 async function riskGate(userId, campaign, chain, ctx) {
@@ -502,6 +505,18 @@ async function cycle(req, res, campaign) {
       return res.status(409).json({ ...(await state(userId, campaign.id)), cycle: { action: 'BLOCK', reason: 'STRUCTURE_INTEGRITY_MISMATCH' }, broker_orders_sent: false });
     }
     const marks = await markOpenLegs(userId, campaign.id, chain);
+    if (strategyObj.signal_model === 'ST_EMA_RSI_TRANSITION') {
+      const direction = campaign.signal_direction;
+      const exit = (direction === 'BUY' && ctx.transition?.exitLong) || (direction === 'SELL' && ctx.transition?.exitShort);
+      if (exit) {
+        const result = await closeOpenLegs(userId, campaign, chain, direction === 'BUY' ? 'SUPERTREND_EXIT_LONG' : 'SUPERTREND_EXIT_SHORT', 'ALL');
+        await db.query('UPDATE paper_campaigns SET realized_pnl=COALESCE(realized_pnl,0)+$1, entry_spot=null, corridor_upper=null, corridor_lower=null, active_expiry=null, signal_direction=null, updated_at=now(), last_status=\'EXIT\', last_reason=$2 WHERE id=$3 AND user_id=$4', [result.realized, direction === 'BUY' ? 'SUPERTREND_EXIT_LONG' : 'SUPERTREND_EXIT_SHORT', campaign.id, userId]);
+        await recordDecision(userId, campaign, strategyObj, ctx, 'EXIT', direction === 'BUY' ? 'SUPERTREND_EXIT_LONG' : 'SUPERTREND_EXIT_SHORT', 'ACTIVE_POSITION', { action: 'CLOSE', direction }, { closed_legs: result.closed, mtm_before_exit: marks.mtm, transition: ctx.transition });
+        return res.json({ ...(await state(userId, campaign.id)), cycle: { action: 'CLOSE', reason: direction === 'BUY' ? 'SUPERTREND_EXIT_LONG' : 'SUPERTREND_EXIT_SHORT', closed: result.closed } });
+      }
+      await recordDecision(userId, campaign, strategyObj, ctx, 'ACTIVE', 'POSITION_ACTIVE', 'ACTIVE_POSITION', { action: 'HOLD', direction }, { mtm_pnl: marks.mtm, transition: ctx.transition });
+      return res.json({ ...(await state(userId, campaign.id)), cycle: { action: 'HOLD', reason: 'POSITION_ACTIVE', direction, signal: ctx.transition?.signal || 'NONE' } });
+    }
     const entrySpot = num(campaign.entry_spot);
     const upper = num(campaign.corridor_upper);
     const lower = num(campaign.corridor_lower);
@@ -535,6 +550,17 @@ async function cycle(req, res, campaign) {
     const holdReason = breach && !confirmedBreach ? 'CORRIDOR_BREACH_NOT_CONFIRMED' : breach ? 'CORRIDOR_BREACH_DETECTED_BUT_ROLL_DISABLED' : 'POSITION_ACTIVE';
     await recordDecision(userId, campaign, strategyObj, ctx, 'ACTIVE', holdReason, 'ACTIVE_POSITION', { action: 'HOLD' }, { mtm_pnl: marks.mtm, corridor_breach: breach, confirmed_breach: confirmedBreach, required_confirmations: rollConfirmations });
     return res.json({ ...(await state(userId, campaign.id)), cycle: { action: 'HOLD', reason: holdReason } });
+  }
+
+  if (strategyObj.signal_model === 'ST_EMA_RSI_TRANSITION') {
+    const signal = ctx.transition?.signal || 'NONE';
+    if (signal === 'NONE') {
+      await recordDecision(userId, campaign, strategyObj, ctx, 'NO_SIGNAL', 'TRANSITION_NOT_CONFIRMED', 'NOT_CONFIRMED', { action: 'NONE', direction: 'NONE' }, { transition: ctx.transition });
+      return res.json({ ...(await state(userId, campaign.id)), cycle: { action: 'NONE', reason: 'TRANSITION_NOT_CONFIRMED', signal, transition: ctx.transition } });
+    }
+    const created = await openNewStructure(req, res, campaign, strategyObj, connection, ctx, chain, `TRANSITION_${signal}`);
+    await db.query('UPDATE paper_campaigns SET signal_direction=$1 WHERE id=$2 AND user_id=$3', [signal, campaign.id, userId]);
+    return created;
   }
 
   const basis = strategyObj.candle_type === 'HEIKIN_ASHI' ? heikinAshi(ctx.completedCandles) : ctx.completedCandles;

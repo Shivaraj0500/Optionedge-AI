@@ -42,6 +42,16 @@ export default async function (req, res) {
   if (Number(s.atr_multiplier) <= 0) errors.push('ATR multiplier must be positive');
   if (Number(s.adx_period) < 2) errors.push('ADX period must be >= 2');
   if (Number(s.atr_period) < 2) errors.push('ATR period must be >= 2');
+  if (s.signal_model === 'ST_EMA_RSI_TRANSITION') {
+    const sc = s.signal_config && typeof s.signal_config === 'object' ? s.signal_config : {};
+    if (s.timeframe !== '15m') errors.push('ST + EMA50 + RSI transition strategy must use the 15m timeframe.');
+    if (s.candle_type !== 'HEIKIN_ASHI') errors.push('ST + EMA50 + RSI transition strategy must use Heikin Ashi candles.');
+    if (Number(sc.supertrend_period) < 2) errors.push('Supertrend period must be >= 2.');
+    if (!(Number(sc.supertrend_multiplier) > 0)) errors.push('Supertrend multiplier must be positive.');
+    if (Number(sc.ema_period) < 2) errors.push('EMA period must be >= 2.');
+    if (Number(sc.rsi_period) < 2) errors.push('RSI period must be >= 2.');
+    if (!(Number(sc.rsi_long_threshold) > Number(sc.rsi_short_threshold))) errors.push('RSI long threshold must be greater than RSI short threshold.');
+  }
   if (s.overnight_exposure) errors.push('Overnight exposure is disabled by the global intraday policy. All intraday positions must be closed by 15:15 IST.');
   if (legs.length < 2) warnings.push('Strategy has fewer than two legs; this is allowed for custom structures but verify intent.');
   if (!legs.some(l => l.option_type === 'CE')) warnings.push('No CE leg configured.');

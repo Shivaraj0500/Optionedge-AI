@@ -1,0 +1,1 @@
+ALTER TABLE strategy_configs ADD COLUMN IF NOT EXISTS signal_config jsonb NOT NULL DEFAULT '{}'::jsonb;

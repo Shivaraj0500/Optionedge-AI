@@ -15,6 +15,14 @@ function n(v, fallback = null) {
 
 function fmtError(e) { return String(e?.message || 'DATA_UNAVAILABLE'); }
 
+function marketSession(now = new Date()) {
+  const ist = new Date(now.getTime() + 330 * 60 * 1000);
+  const day = ist.getUTCDay();
+  const minutes = ist.getUTCHours() * 60 + ist.getUTCMinutes();
+  const open = day >= 1 && day <= 5 && minutes >= 9 * 60 + 15 && minutes < 15 * 60 + 40;
+  return { open, status: open ? 'OPEN' : (day === 0 || day === 6 ? 'WEEKEND' : minutes < 9 * 60 + 15 ? 'PRE_OPEN' : 'CLOSED'), checked_at: now.toISOString() };
+}
+
 async function broker(userId) {
   const q = await db.query('SELECT access_token, expires_at, status FROM broker_connections WHERE user_id=$1 LIMIT 1', [userId]);
   const c = q.rows[0];
@@ -90,15 +98,17 @@ async function liveIndex(connection, underlying, timeframe = '15m') {
   if(dx.length<period) throw new Error('INSUFFICIENT_CANDLES');
   let adx=dx.slice(0,period).reduce((a,b)=>a+b,0)/period;
   for(let i=period;i<dx.length;i++) adx=((adx*(period-1))+dx[i])/period;
-  const liveQuotes = await liveLtp(connection, [instrumentKey]);
+  const session = marketSession();
+  const liveQuotes = session.open ? await liveLtp(connection, [instrumentKey]) : {};
   const liveSpot = n(liveQuotes[instrumentKey]);
-  return { underlying, timeframe, price:liveSpot ?? last.close, price_source:liveSpot!=null?'UPSTOX_LTP_V3':'UPSTOX_COMPLETED_CANDLE_CLOSE', adx, plus_di:plusDi, minus_di:minusDi, atr, completed_candle:last.timestamp, source:'UPSTOX' };
+  return { underlying, timeframe, price:liveSpot ?? last.close, price_source:liveSpot!=null?'UPSTOX_LTP_V3':'UPSTOX_COMPLETED_CANDLE_CLOSE', market_status:session.status, adx, plus_di:plusDi, minus_di:minusDi, atr, completed_candle:last.timestamp, source:'UPSTOX' };
 }
 
 export default async function(req,res){
   const userId=req.user.id;
   const tf=String(req.query?.timeframe||'15m');
   try {
+    const session=marketSession();
     const connection=await broker(userId);
     const [nifty, banknifty, tradesQ]=await Promise.all([
       liveIndex(connection,'NIFTY 50',tf).catch(e=>({underlying:'NIFTY 50',error:fmtError(e),source:'UPSTOX'})),
@@ -106,9 +116,9 @@ export default async function(req,res){
       db.query(`SELECT l.id,l.campaign_id,l.strategy_id,l.strategy_version,l.role,l.side,l.option_type,l.execution_rank,l.expiry,l.strike,l.trading_symbol,l.instrument_key,l.quantity,l.entry_price,l.current_price,l.pnl,l.status,l.entry_at,l.last_mark_at,c.underlying,c.status AS campaign_status,c.started_at FROM paper_campaign_legs l JOIN paper_campaigns c ON c.id=l.campaign_id AND c.user_id=l.user_id WHERE l.user_id=$1 AND l.status='OPEN' AND c.status='RUNNING' ORDER BY c.started_at DESC,l.execution_rank ASC`,[userId])
     ]);
     const rawTrades = tradesQ.rows.map(t=>({...t,strike:n(t.strike),quantity:n(t.quantity,0),entry_price:n(t.entry_price),current_price:n(t.current_price),pnl:n(t.pnl,0)}));
-    const liveQuotes = await liveLtp(connection, rawTrades.map(t => t.instrument_key));
+    const liveQuotes = session.open ? await liveLtp(connection, rawTrades.map(t => t.instrument_key)) : {};
     const trades = rawTrades.map(t => {
-      const livePrice = n(liveQuotes[t.instrument_key]);
+      const livePrice = session.open ? n(liveQuotes[t.instrument_key]) : null;
       const currentPrice = livePrice ?? t.current_price;
       const pnl = Number.isFinite(livePrice) ? (t.side === 'BUY' ? 1 : -1) * (livePrice - Number(t.entry_price)) * Number(t.quantity) : Number(t.pnl || 0);
       return { ...t, current_price: currentPrice, pnl, live_price: Number.isFinite(livePrice), mark_source: Number.isFinite(livePrice) ? 'UPSTOX_LTP_V3' : 'STORED_PAPER_MARK' };
@@ -122,7 +132,9 @@ export default async function(req,res){
     }
     const runningPnl=trades.reduce((s,t)=>s+Number(t.pnl||0),0);
     const campaigns=[...new Set(trades.map(t=>t.campaign_id))];
-    return res.json({source:'OptionEdge AI Dashboard',as_of:new Date().toISOString(),timeframe:tf,indices:{nifty,nifty_bank:banknifty},running:{campaigns:campaigns.length,legs:trades.length,pnl:runningPnl,trades}});
+    const markTimes=trades.map(t=>t.last_mark_at).filter(Boolean).map(v=>new Date(v).getTime()).filter(Number.isFinite);
+    const markAsOf=markTimes.length?new Date(Math.max(...markTimes)).toISOString():null;
+    return res.json({source:'OptionEdge AI Dashboard',as_of:new Date().toISOString(),mark_as_of:markAsOf,timeframe:tf,market:session,indices:{nifty,nifty_bank:banknifty},running:{campaigns:campaigns.length,legs:trades.length,pnl:runningPnl,trades}});
   } catch(e) {
     return res.status(409).json({error:fmtError(e),source:'OptionEdge AI Dashboard'});
   }

@@ -13,6 +13,14 @@ function n(v, fallback = null) {
   return Number.isFinite(x) ? x : fallback;
 }
 
+function marketSession(now = new Date()) {
+  const ist = new Date(now.getTime() + 330 * 60 * 1000);
+  const day = ist.getUTCDay();
+  const minutes = ist.getUTCHours() * 60 + ist.getUTCMinutes();
+  const open = day >= 1 && day <= 5 && minutes >= 9 * 60 + 15 && minutes < 15 * 60 + 40;
+  return { open, status: open ? 'OPEN' : (day === 0 || day === 6 ? 'WEEKEND' : minutes < 9 * 60 + 15 ? 'PRE_OPEN' : 'CLOSED'), checked_at: now.toISOString() };
+}
+
 async function broker(userId) {
   const q = await db.query('SELECT access_token, expires_at, status FROM broker_connections WHERE user_id=$1 LIMIT 1', [userId]);
   const c = q.rows[0];
@@ -45,8 +53,9 @@ async function liveLtp(connection, instrumentKeys) {
 export default async function(req, res) {
   const userId = req.user.id;
   try {
+    const session = marketSession();
     const connection = await broker(userId);
-    const q = await db.query(`SELECT l.id,l.campaign_id,l.instrument_key,l.side,l.entry_price,l.current_price,l.pnl,l.quantity,l.status,c.underlying FROM paper_campaign_legs l JOIN paper_campaigns c ON c.id=l.campaign_id AND c.user_id=l.user_id WHERE l.user_id=$1 AND l.status='OPEN' AND c.status='RUNNING' ORDER BY c.started_at DESC,l.execution_rank ASC`, [userId]);
+    const q = await db.query(`SELECT l.id,l.campaign_id,l.instrument_key,l.side,l.entry_price,l.current_price,l.pnl,l.quantity,l.status,l.last_mark_at,c.underlying FROM paper_campaign_legs l JOIN paper_campaigns c ON c.id=l.campaign_id AND c.user_id=l.user_id WHERE l.user_id=$1 AND l.status='OPEN' AND c.status='RUNNING' ORDER BY c.started_at DESC,l.execution_rank ASC`, [userId]);
     const rows = q.rows.map(t => ({
       ...t,
       entry_price: n(t.entry_price),
@@ -59,9 +68,9 @@ export default async function(req, res) {
       INDEX_KEYS['BANK NIFTY'],
       ...rows.map(t => t.instrument_key).filter(Boolean)
     ])];
-    const quotes = await liveLtp(connection, keys);
+    const quotes = session.open ? await liveLtp(connection, keys) : {};
     const trades = rows.map(t => {
-      const price = n(quotes[t.instrument_key]);
+      const price = session.open ? n(quotes[t.instrument_key]) : null;
       const current = price ?? t.current_price;
       const pnl = price != null && t.entry_price != null
         ? (t.side === 'BUY' ? 1 : -1) * (price - t.entry_price) * t.quantity
@@ -80,10 +89,14 @@ export default async function(req, res) {
       nifty_bank: n(quotes[INDEX_KEYS['BANK NIFTY']])
     };
     const runningPnl = trades.reduce((sum, t) => sum + Number(t.pnl || 0), 0);
+    const markTimes = rows.map(t => t.last_mark_at).filter(Boolean).map(v => new Date(v).getTime()).filter(Number.isFinite);
+    const markAsOf = markTimes.length ? new Date(Math.max(...markTimes)).toISOString() : null;
     return res.json({
       source: 'OptionEdge AI Dashboard',
       as_of: new Date().toISOString(),
+      mark_as_of: markAsOf,
       index_prices: indexPrices,
+      market: session,
       running: {
         campaigns: [...new Set(trades.map(t => t.campaign_id))].length,
         legs: trades.length,

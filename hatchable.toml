@@ -46,6 +46,14 @@ write = "own"
 read = "own"
 write = "own"
 
+[db.tables.live_execution_configs]
+read = "own"
+write = "own"
+
+[db.tables.live_orders]
+read = "own"
+write = "own"
+
 [db.tables.strategy_configs]
 read = "own"
 write = "own"

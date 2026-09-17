@@ -592,10 +592,12 @@ async function reconcileRecovery(req, res, campaign) {
   const strategyQ = await db.query('SELECT * FROM strategy_configs WHERE id=$1 AND user_id=$2 LIMIT 1', [campaign.strategy_id, userId]);
   if (!strategyQ.rows[0]) throw new Error('STRATEGY_NOT_FOUND');
   const base = strategyQ.rows[0];
-  const versionQ = await db.query('SELECT version_number, config FROM strategy_versions WHERE strategy_id=$1 AND user_id=$2 AND version_number=$3 LIMIT 1', [campaign.strategy_id, userId, Number(campaign.strategy_version || base.version || 1)]);
+  const versionQ = campaign.strategy_version_id
+    ? await db.query('SELECT id, version_number, config FROM strategy_versions WHERE id=$1 AND strategy_id=$2 AND user_id=$3 LIMIT 1', [campaign.strategy_version_id, campaign.strategy_id, userId])
+    : await db.query('SELECT id, version_number, config FROM strategy_versions WHERE strategy_id=$1 AND user_id=$2 AND version_number=$3 LIMIT 1', [campaign.strategy_id, userId, Number(campaign.strategy_version || base.version || 1)]);
   if (!versionQ.rows[0]) throw new Error('STRATEGY_VERSION_NOT_FOUND');
   const pinned = versionQ.rows[0].config && typeof versionQ.rows[0].config === 'object' ? versionQ.rows[0].config : {};
-  const strategy = { ...base, ...pinned, option_expiry: pinned.option_expiry || base.option_expiry, id: base.id, version: Number(versionQ.rows[0].version_number), leg_config: pinned.legs || base.leg_config || [] };
+  const strategy = { ...base, ...pinned, option_expiry: pinned.option_expiry || base.option_expiry, id: base.id, version: Number(versionQ.rows[0].version_number), strategy_version_id: versionQ.rows[0].id, leg_config: pinned.legs || base.leg_config || [] };
   if (!openQ.rows.length) {
     await db.query("UPDATE paper_campaigns SET recovery_required=false, cycle_lock_until=null, last_cycle_at=now(), last_status='RECOVERED', last_reason='NO_OPEN_LEGS', updated_at=now() WHERE id=$1 AND user_id=$2", [campaign.id, userId]);
     return res.json({ ...(await state(userId, campaign.id)), cycle: { action: 'RECOVER', reason: 'NO_OPEN_LEGS', broker_orders_sent: false } });
@@ -608,7 +610,11 @@ async function reconcileRecovery(req, res, campaign) {
   const connection = await broker(req);
   const ctx = await marketContext(connection, strategy, req);
   const chain = await optionChain(connection, strategy, userId);
-  const expected = (Array.isArray(strategy.leg_config) ? strategy.leg_config : []).filter(x => x.enabled !== false);
+  const recoveryDirection = strategy.signal_model === 'ST_EMA_RSI_TRANSITION' ? String(campaign.signal_direction || '').toUpperCase() : null;
+  const recoverySource = strategy.signal_model === 'ST_EMA_RSI_TRANSITION'
+    ? (recoveryDirection === 'SELL' ? strategy.signal_config?.short_legs : strategy.signal_config?.long_legs)
+    : strategy.leg_config;
+  const expected = (Array.isArray(recoverySource) ? recoverySource : []).filter(x => x.enabled !== false);
   const expectedIds = new Set(expected.map(x => String(x.id)));
   const activeIds = new Set(openQ.rows.map(x => String(x.leg_id)));
   if (expected.length !== openQ.rows.length || [...expectedIds].some(id => !activeIds.has(id))) throw new Error('STRUCTURE_INTEGRITY_MISMATCH');
@@ -751,6 +757,12 @@ export default async function(req, res) {
     if (terminalClean) {
       await db.query('UPDATE paper_campaigns SET last_cycle_at=COALESCE(last_cycle_at,now()), last_status=$1, last_reason=COALESCE(last_reason,$2), updated_at=now(), cycle_lock_until=null, recovery_required=false WHERE id=$3 AND user_id=$4', [current.status, current.last_reason || message, campaign.id, userId]);
       return res.status(200).json({ ...(await state(userId, campaign.id)), cycle: { action: 'NO_ACTION', reason: current.last_reason || 'TERMINAL_STATE_RECONCILED' }, broker_orders_sent: false, terminal_reconciled: true });
+    }
+    const openCount = Number(openQ.rows[0]?.count || 0);
+    const nonPositionFailure = openCount === 0 && /^(MARKET_DATA_STALE|UPSTOX_HISTORICAL_DATA_FAILED|UPSTOX_INTRADAY_DATA_FAILED|UPSTOX_OPTION_CONTRACTS_FAILED|UPSTOX_OPTION_CHAIN_FAILED|INSUFFICIENT_CANDLES|SIGNAL_INDICATORS_UNAVAILABLE|MARKET_CONTEXT_INVALID|INVALID_STRATEGY_MARKET_CONFIGURATION)$/.test(message);
+    if (nonPositionFailure) {
+      await db.query('UPDATE paper_campaigns SET last_cycle_at=now(), last_status=$1, last_reason=$2, updated_at=now(), cycle_lock_until=null, recovery_required=false WHERE id=$3 AND user_id=$4', ['WAITING', message, campaign.id, userId]);
+      return res.status(200).json({ ...(await state(userId, campaign.id)), cycle: { action: 'NONE', reason: message, broker_orders_sent: false, retryable: true }, broker_orders_sent: false });
     }
     await db.query('UPDATE paper_campaigns SET last_cycle_at=now(), last_status=$1, last_reason=$2, updated_at=now(), recovery_required=true WHERE id=$3 AND user_id=$4', ['ERROR', message, campaign.id, userId]);
     return res.status(502).json({ ...(await state(userId, campaign.id)), error: message, broker_orders_sent: false });

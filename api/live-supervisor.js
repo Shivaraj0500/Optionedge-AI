@@ -100,52 +100,35 @@ export default async function(req,res){
   const users=requestedUser?[requestedUser]:((await db.query("SELECT DISTINCT c.user_id FROM live_campaigns c JOIN live_execution_configs e ON e.user_id=c.user_id WHERE c.status='RUNNING' AND e.armed=true AND e.enabled=true")).rows.map(x=>x.user_id));
   const results=[];
   for(const userId of users){
-    const q=await db.query("SELECT * FROM live_campaigns WHERE user_id=$1 AND status='RUNNING' ORDER BY started_at DESC LIMIT 1",[userId]);
-    const c=q.rows[0];
-    if(!c){results.push({user_id:userId,state:'NO_CAMPAIGN'});continue;}
     const e=await db.query('SELECT armed,enabled FROM live_execution_configs WHERE user_id=$1 LIMIT 1',[userId]);
     if(!e.rows[0]?.armed||e.rows[0]?.enabled===false){results.push({user_id:userId,state:'DISARMED'});continue;}
+    const campaigns=(await db.query("SELECT * FROM live_campaigns WHERE user_id=$1 AND status='RUNNING' ORDER BY started_at ASC",[userId])).rows;
+    if(!campaigns.length){results.push({user_id:userId,state:'NO_CAMPAIGN'});continue;}
     const b=await broker(userId);
-    if(!b){await db.query("UPDATE live_campaigns SET recovery_required=true,last_status='BROKER_UNAVAILABLE',last_reason='SUPERVISOR_BROKER_RECONCILIATION_FAILED',updated_at=now() WHERE id=$1 AND user_id=$2",[c.id,userId]);results.push({user_id:userId,state:'BROKER_UNAVAILABLE'});continue;}
-    const orders=await reconcileOrders(userId,c);
-    const positions=await reconcilePositions(userId,c);
-
-    // Re-read after reconciliation: an order/position mismatch or partial fill may
-    // have set recovery_required, and that must block the strategy cycle immediately.
-    const freshQ=await db.query("SELECT * FROM live_campaigns WHERE id=$1 AND user_id=$2 LIMIT 1",[c.id,userId]);
-    const fresh=freshQ.rows[0]||c;
-    let cycle=null;
-    if(positions.positionState==='MATCH' && !fresh.recovery_required){
-      const lock=await db.query("UPDATE live_campaigns SET cycle_lock_until=now()+interval '20 seconds' WHERE id=$1 AND user_id=$2 AND status='RUNNING' AND (cycle_lock_until IS NULL OR cycle_lock_until<now()) RETURNING id",[fresh.id,userId]);
-      if(lock.rows.length){
-        try{
-          cycle=await runLiveCycle(userId,fresh);
-        }catch(e){
-          cycle={status:500,payload:{error:String(e?.message||e)}};
-          await db.query("UPDATE live_campaigns SET last_status='SUPERVISOR_CYCLE_ERROR',last_reason=$1,updated_at=now() WHERE id=$2 AND user_id=$3",[String(e?.message||e).slice(0,500),fresh.id,userId]);
-        }finally{
-          await db.query('UPDATE live_campaigns SET cycle_lock_until=null WHERE id=$1 AND user_id=$2',[fresh.id,userId]);
-        }
-      }else cycle={status:409,payload:{error:'LIVE_CYCLE_ALREADY_RUNNING'}};
-    }
-
-    const afterQ=await db.query("SELECT status,recovery_required FROM live_campaigns WHERE id=$1 AND user_id=$2 LIMIT 1",[fresh.id,userId]);
-    const after=afterQ.rows[0]||fresh;
-    await db.query('INSERT INTO audit_events(user_id,event_type,entity_type,entity_id,details) VALUES($1,$2,$3,$4,$5)',[userId,'LIVE_SUPERVISOR_RUN','live_campaign',fresh.id,JSON.stringify({orders,positions,cycle,recovery_required:!!after.recovery_required})]);
-    results.push({user_id:userId,campaign_id:fresh.id,orders,positions,recovery_required:!!after.recovery_required,cycle});
-
-    // Chain the next five-minute firing only while the live campaign is still
-    // armed, enabled, broker-connected and not awaiting recovery.
-    const safe=after.status==='RUNNING' && !after.recovery_required;
-    if(safe){
-      const cfg=await db.query('SELECT armed,enabled FROM live_execution_configs WHERE user_id=$1 LIMIT 1',[userId]);
-      const br=await broker(userId);
-      if(cfg.rows[0]?.armed && cfg.rows[0]?.enabled!==false && br){
-        const istNow=new Date(Date.now()+330*60*1000);
-        const nowMinutes=istNow.getUTCHours()*60+istNow.getUTCMinutes();
-        if(nowMinutes>=minutesOf(INTRADAY_SQUARE_OFF)) await armNextDailySquareOff(userId);
-        else await scheduler.at(new Date(Date.now()+5*60*1000),'/api/live-supervisor',{payload:{user_id:userId},name:'live-supervisor-'+userId});
+    if(!b){for(const c of campaigns){await db.query("UPDATE live_campaigns SET recovery_required=true,last_status='BROKER_UNAVAILABLE',last_reason='SUPERVISOR_BROKER_RECONCILIATION_FAILED',updated_at=now() WHERE id=$1 AND user_id=$2",[c.id,userId]);results.push({user_id:userId,campaign_id:c.id,state:'BROKER_UNAVAILABLE'});}continue;}
+    let anySafe=false;
+    for(const c of campaigns){
+      const orders=await reconcileOrders(userId,c);
+      const positions=await reconcilePositions(userId,c);
+      const freshQ=await db.query("SELECT * FROM live_campaigns WHERE id=$1 AND user_id=$2 LIMIT 1",[c.id,userId]);
+      const fresh=freshQ.rows[0]||c;
+      let cycle=null;
+      if(positions.positionState==='MATCH' && !fresh.recovery_required){
+        const lock=await db.query("UPDATE live_campaigns SET cycle_lock_until=now()+interval '20 seconds' WHERE id=$1 AND user_id=$2 AND status='RUNNING' AND (cycle_lock_until IS NULL OR cycle_lock_until<now()) RETURNING id",[fresh.id,userId]);
+        if(lock.rows.length){
+          try{cycle=await runLiveCycle(userId,fresh)}catch(err){cycle={status:500,payload:{error:String(err?.message||err)}};await db.query("UPDATE live_campaigns SET last_status='SUPERVISOR_CYCLE_ERROR',last_reason=$1,updated_at=now() WHERE id=$2 AND user_id=$3",[String(err?.message||err).slice(0,500),fresh.id,userId])}finally{await db.query('UPDATE live_campaigns SET cycle_lock_until=null WHERE id=$1 AND user_id=$2',[fresh.id,userId])}
+        }else cycle={status:409,payload:{error:'LIVE_CYCLE_ALREADY_RUNNING'}};
       }
+      const afterQ=await db.query("SELECT status,recovery_required FROM live_campaigns WHERE id=$1 AND user_id=$2 LIMIT 1",[fresh.id,userId]);
+      const after=afterQ.rows[0]||fresh;
+      await db.query('INSERT INTO audit_events(user_id,event_type,entity_type,entity_id,details) VALUES($1,$2,$3,$4,$5)',[userId,'LIVE_SUPERVISOR_RUN','live_campaign',fresh.id,JSON.stringify({orders,positions,cycle,recovery_required:!!after.recovery_required})]);
+      results.push({user_id:userId,campaign_id:fresh.id,orders,positions,recovery_required:!!after.recovery_required,cycle});
+      if(after.status==='RUNNING'&&!after.recovery_required)anySafe=true;
+    }
+    if(anySafe){
+      const istNow=new Date(Date.now()+330*60*1000),nowMinutes=istNow.getUTCHours()*60+istNow.getUTCMinutes();
+      if(nowMinutes>=minutesOf(INTRADAY_SQUARE_OFF)) await armNextDailySquareOff(userId);
+      else await scheduler.at(new Date(Date.now()+5*60*1000),'/api/live-supervisor',{payload:{user_id:userId},name:'live-supervisor-'+userId});
     }
   }
   return res.json({ok:true,processed:results.length,results,trigger:req.headers['x-hatchable-trigger']||'unknown'});

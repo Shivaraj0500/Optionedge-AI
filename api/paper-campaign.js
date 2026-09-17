@@ -19,8 +19,13 @@ function nowIstMinutes() {
 export default async function(req, res) {
   const user = req.user;
   if (req.method === 'GET') {
-    const { rows } = await db.query('SELECT * FROM paper_campaigns WHERE user_id = $1 ORDER BY started_at DESC LIMIT 25', [user.id]);
-    return res.json({ campaigns: rows });
+    const { rows } = await db.query(`SELECT c.*,s.name AS strategy_name,s.signal_model,s.timeframe,s.candle_type,
+      v.status AS strategy_version_status,v.version_number AS pinned_version_number
+      FROM paper_campaigns c
+      LEFT JOIN strategy_configs s ON s.id=c.strategy_id AND s.user_id=c.user_id
+      LEFT JOIN strategy_versions v ON v.id=c.strategy_version_id AND v.strategy_id=c.strategy_id AND v.user_id=c.user_id
+      WHERE c.user_id=$1 ORDER BY c.started_at DESC LIMIT 50`, [user.id]);
+    return res.json({ campaigns: rows, running: rows.filter(x=>String(x.status).toUpperCase()==='RUNNING') });
   }
   const b = req.body || {};
   const strategyId = String(b.strategy_id || '');
@@ -57,8 +62,11 @@ export default async function(req, res) {
     });
   }
 
-  const { rows: running } = await db.query("SELECT id FROM paper_campaigns WHERE user_id = $1 AND status = 'RUNNING' LIMIT 1", [user.id]);
-  if (running.length) return res.status(409).json({ error: 'PAPER_CAMPAIGN_ALREADY_RUNNING', campaign_id: running[0].id });
+  // Multiple independent paper campaigns are allowed. The unique identity is the
+  // selected strategy version, so the same validated version cannot accidentally
+  // be started twice while a prior campaign is still running.
+  const duplicate = await db.query("SELECT id FROM paper_campaigns WHERE user_id=$1 AND strategy_id=$2 AND strategy_version_id=$3 AND status='RUNNING' LIMIT 1", [user.id, strategyId, strategyVersionId]);
+  if (duplicate.rows.length) return res.status(409).json({ error: 'PAPER_STRATEGY_ALREADY_RUNNING', campaign_id: duplicate.rows[0].id, strategy_id: strategyId, strategy_version_id: strategyVersionId });
   const { rows } = await db.query('INSERT INTO paper_campaigns (user_id, strategy_id, strategy_version_id, underlying, status, mode, strategy_version, last_status, last_reason) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *', [user.id, strategyId, strategyVersionId, underlying, 'RUNNING', 'LIVE_MARKET_PAPER', version, 'STARTED', 'CAMPAIGN_STARTED']);
   return res.status(201).json({ campaign: rows[0], broker_orders_sent: false, mode: 'LIVE_MARKET_PAPER', strategy_version: version });
 }

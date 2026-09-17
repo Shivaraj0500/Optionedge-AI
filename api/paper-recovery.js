@@ -18,7 +18,10 @@ function nowIstMinutes() {
 
 export default async function(req, res) {
   const userId = req.user.id;
-  const q = await db.query("SELECT * FROM paper_campaigns WHERE user_id=$1 ORDER BY started_at DESC LIMIT 1", [userId]);
+  const requestedCampaignId = String(req.query?.campaign_id || req.body?.campaign_id || '');
+  const q = requestedCampaignId
+    ? await db.query("SELECT * FROM paper_campaigns WHERE id=$1 AND user_id=$2 LIMIT 1", [requestedCampaignId, userId])
+    : await db.query("SELECT * FROM paper_campaigns WHERE user_id=$1 ORDER BY started_at DESC LIMIT 1", [userId]);
   const campaign = q.rows[0] || null;
   if (!campaign) return res.json({ status: 'READY', recovery_required: false, campaign: null, reasons: [] });
 

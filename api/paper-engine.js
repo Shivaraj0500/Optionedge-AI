@@ -233,15 +233,43 @@ async function optionChain(connection, strategy, userId) {
   // Upstox Option Contracts accepts relative expiry keywords, while the
   // Put/Call Option Chain requires the resolved YYYY-MM-DD expiry. Resolve
   // the configured expiry once, then use that exact date for both data sets.
-  const contractResponse = await fetch('https://api.upstox.com/v2/option/contract?instrument_key=' + encodeURIComponent(instrumentKey) + '&expiry_date=' + encodeURIComponent(expiryRequest), { headers });
-  const contractData = await contractResponse.json().catch(() => ({}));
+  let contractResponse = await fetch('https://api.upstox.com/v2/option/contract?instrument_key=' + encodeURIComponent(instrumentKey) + '&expiry_date=' + encodeURIComponent(expiryRequest), { headers });
+  let contractData = await contractResponse.json().catch(() => ({}));
   if (contractResponse.status === 401) {
     await db.query("UPDATE broker_connections SET status='EXPIRED', updated_at=now() WHERE user_id=$1", [userId]);
     throw new Error('UPSTOX_TOKEN_EXPIRED');
   }
-  if (!contractResponse.ok || contractData.status !== 'success' || !Array.isArray(contractData.data) || !contractData.data.length) throw new Error('UPSTOX_OPTION_CONTRACTS_FAILED');
+  // Upstox documents relative expiry keywords, but some broker/API responses can
+  // reject the keyword. Fall back to the unfiltered contract list and resolve the
+  // requested expiry locally so one strategy cannot fail simply because the
+  // upstream keyword parser is unavailable.
+  if (!contractResponse.ok || contractData.status !== 'success' || !Array.isArray(contractData.data) || !contractData.data.length) {
+    contractResponse = await fetch('https://api.upstox.com/v2/option/contract?instrument_key=' + encodeURIComponent(instrumentKey), { headers });
+    contractData = await contractResponse.json().catch(() => ({}));
+  }
+  if (contractResponse.status === 401) {
+    await db.query("UPDATE broker_connections SET status='EXPIRED', updated_at=now() WHERE user_id=$1", [userId]);
+    throw new Error('UPSTOX_TOKEN_EXPIRED');
+  }
+  if (!contractResponse.ok || contractData.status !== 'success' || !Array.isArray(contractData.data) || !contractData.data.length) {
+    const upstream = String(contractData?.errors?.[0]?.message || contractData?.message || contractData?.error || '').slice(0,240);
+    throw new Error(`UPSTOX_OPTION_CONTRACTS_FAILED:${contractResponse.status || 'NO_STATUS'}:${strategy.underlying}:${expiryRequest}${upstream ? ':' + upstream : ''}`);
+  }
   const contracts = contractData.data;
-  const expiry = contracts.map(x => x.expiry).filter(Boolean).sort()[0];
+  const today = dateOnly(istDate());
+  const allExpiries = [...new Set(contracts.map(x => x.expiry).filter(Boolean))].sort();
+  const future = allExpiries.filter(x => x >= today);
+  const weekly = [...new Set(contracts.filter(x => x.weekly === true && x.expiry >= today).map(x => x.expiry))].sort();
+  const monthly = [...new Set(contracts.filter(x => x.weekly !== true && x.expiry >= today).map(x => x.expiry))].sort();
+  let expiry = expiryRequest;
+  if (/^\\d{4}-\\d{2}-\\d{2}$/.test(expiryRequest)) expiry = expiryRequest;
+  else if (expiryRequest === 'current_week') expiry = weekly[0] || future[0];
+  else if (expiryRequest === 'next_week') expiry = weekly[1] || future[1];
+  else if (expiryRequest === 'far_week') expiry = weekly[2] || future[2];
+  else if (expiryRequest === 'current_month') expiry = monthly.find(x => x.slice(0,7) === today.slice(0,7)) || monthly[0] || future[0];
+  else if (expiryRequest === 'next_month') expiry = monthly.find(x => x.slice(0,7) > today.slice(0,7)) || monthly[1] || future[1];
+  else if (expiryRequest === 'far_month') expiry = monthly.find(x => x.slice(0,7) > today.slice(0,7) && x.slice(0,7) > (monthly[0] || '').slice(0,7)) || monthly[2] || future[2];
+  if (!expiry) throw new Error('UPSTOX_EXPIRY_RESOLUTION_FAILED');
   if (!expiry) throw new Error('UPSTOX_EXPIRY_RESOLUTION_FAILED');
   const chainResponse = await fetch('https://api.upstox.com/v2/option/chain?instrument_key=' + encodeURIComponent(instrumentKey) + '&expiry_date=' + encodeURIComponent(expiry), { headers });
   const chain = await chainResponse.json().catch(() => ({}));
@@ -412,16 +440,32 @@ async function recordDecision(userId, campaign, strategy, ctx, status, reason, r
 }
 
 async function state(userId, campaignId) {
-  const c = campaignId ? await db.query('SELECT * FROM paper_campaigns WHERE id=$1 AND user_id=$2 LIMIT 1', [campaignId, userId]) : await db.query("SELECT * FROM paper_campaigns WHERE user_id=$1 ORDER BY started_at DESC LIMIT 1", [userId]);
+  const c = campaignId
+    ? await db.query(`SELECT c.*,s.name AS strategy_name,s.signal_model,s.timeframe,s.candle_type,v.version_number AS pinned_version_number
+      FROM paper_campaigns c
+      LEFT JOIN strategy_configs s ON s.id=c.strategy_id AND s.user_id=c.user_id
+      LEFT JOIN strategy_versions v ON v.id=c.strategy_version_id AND v.strategy_id=c.strategy_id AND v.user_id=c.user_id
+      WHERE c.id=$1 AND c.user_id=$2 LIMIT 1`, [campaignId, userId])
+    : await db.query(`SELECT c.*,s.name AS strategy_name,s.signal_model,s.timeframe,s.candle_type,v.version_number AS pinned_version_number
+      FROM paper_campaigns c
+      LEFT JOIN strategy_configs s ON s.id=c.strategy_id AND s.user_id=c.user_id
+      LEFT JOIN strategy_versions v ON v.id=c.strategy_version_id AND v.strategy_id=c.strategy_id AND v.user_id=c.user_id
+      WHERE c.user_id=$1 ORDER BY c.started_at DESC LIMIT 1`, [userId]);
   const campaign = c.rows[0];
-  if (!campaign) return { campaign: null, legs: [], decisions: [] };
+  if (!campaign) return { campaign: null, campaigns: [], legs: [], decisions: [] };
   const legs = await db.query('SELECT * FROM paper_campaign_legs WHERE campaign_id=$1 AND user_id=$2 ORDER BY entry_at DESC, execution_rank', [campaign.id, userId]);
   const decisions = await db.query('SELECT * FROM paper_decisions WHERE campaign_id=$1 AND user_id=$2 ORDER BY cycle_at DESC LIMIT 10', [campaign.id, userId]);
   const open = legs.rows.filter(x => x.status === 'OPEN');
   const mtm = open.reduce((s, x) => s + Number(x.pnl || 0), 0);
   const realized = Number(campaign.realized_pnl || 0);
+  const all = await db.query(`SELECT c.*,s.name AS strategy_name,s.signal_model,s.timeframe,s.candle_type,v.version_number AS pinned_version_number
+    FROM paper_campaigns c
+    LEFT JOIN strategy_configs s ON s.id=c.strategy_id AND s.user_id=c.user_id
+    LEFT JOIN strategy_versions v ON v.id=c.strategy_version_id AND v.strategy_id=c.strategy_id AND v.user_id=c.user_id
+    WHERE c.user_id=$1 ORDER BY c.started_at DESC LIMIT 50`, [userId]);
   return {
     campaign: { ...campaign, entry_spot: num(campaign.entry_spot, null), corridor_upper: num(campaign.corridor_upper, null), corridor_lower: num(campaign.corridor_lower, null), realized_pnl: realized, mtm_pnl: mtm, total_pnl: realized + mtm },
+    campaigns: all.rows,
     legs: legs.rows.map(x => ({ ...x, strike: Number(x.strike), quantity: Number(x.quantity), entry_price: Number(x.entry_price), exit_price: x.exit_price == null ? null : Number(x.exit_price), current_price: x.current_price == null ? null : Number(x.current_price), pnl: Number(x.pnl || 0) })),
     decisions: decisions.rows
   };
@@ -759,7 +803,7 @@ export default async function(req, res) {
       return res.status(200).json({ ...(await state(userId, campaign.id)), cycle: { action: 'NO_ACTION', reason: current.last_reason || 'TERMINAL_STATE_RECONCILED' }, broker_orders_sent: false, terminal_reconciled: true });
     }
     const openCount = Number(openQ.rows[0]?.count || 0);
-    const nonPositionFailure = openCount === 0 && /^(MARKET_DATA_STALE|UPSTOX_HISTORICAL_DATA_FAILED|UPSTOX_INTRADAY_DATA_FAILED|UPSTOX_OPTION_CONTRACTS_FAILED|UPSTOX_OPTION_CHAIN_FAILED|INSUFFICIENT_CANDLES|SIGNAL_INDICATORS_UNAVAILABLE|MARKET_CONTEXT_INVALID|INVALID_STRATEGY_MARKET_CONFIGURATION)$/.test(message);
+    const nonPositionFailure = openCount === 0 && ['MARKET_DATA_STALE','UPSTOX_HISTORICAL_DATA_FAILED','UPSTOX_INTRADAY_DATA_FAILED','UPSTOX_OPTION_CONTRACTS_FAILED','UPSTOX_OPTION_CHAIN_FAILED','INSUFFICIENT_CANDLES','SIGNAL_INDICATORS_UNAVAILABLE','MARKET_CONTEXT_INVALID','INVALID_STRATEGY_MARKET_CONFIGURATION'].some(code => message === code || message.startsWith(code + ':'));
     if (nonPositionFailure) {
       await db.query('UPDATE paper_campaigns SET last_cycle_at=now(), last_status=$1, last_reason=$2, updated_at=now(), cycle_lock_until=null, recovery_required=false WHERE id=$3 AND user_id=$4', ['WAITING', message, campaign.id, userId]);
       return res.status(200).json({ ...(await state(userId, campaign.id)), cycle: { action: 'NONE', reason: message, broker_orders_sent: false, retryable: true }, broker_orders_sent: false });

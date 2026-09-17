@@ -14,13 +14,7 @@ write = "own"
 read = "own"
 write = "own"
 
-[db.tables.backtest_runs]
-read = "own"
-write = "own"
-
-[db.tables.backtest_trades]
-read = "own"
-write = "own"
+# Legacy research tables are retired by migration.
 
 [db.tables.broker_connections]
 read = "own"
